@@ -5,7 +5,7 @@ import { loadEnv } from "../src/config/env.js";
 import type { Notifier, Sent } from "../src/notify.js";
 import { withinHours } from "../src/safety/hours.js";
 import { memoryStore } from "../src/store.js";
-import { missedCallTextBack } from "../src/textBack.js";
+import { flushDeferredTextBacks, missedCallTextBack } from "../src/textBack.js";
 import { twilioSignature, validTwilioSignature } from "../src/twilio/signature.js";
 import { handleVapi, needsTextBack, type Deps } from "../src/vapi/handler.js";
 import { Watchdog, watchdogTick } from "../src/safety/watchdog.js";
@@ -249,7 +249,7 @@ describe("text-back", () => {
   it("respects quiet hours and opt-outs", async () => {
     const { deps, store } = setup();
     const business = deps.businesses[0]!;
-    expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_11PM }, business, CALLER, "x")).toEqual({ sent: false, why: "outside 8am-9pm for the recipient" });
+    expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_11PM }, business, CALLER, "x")).toEqual({ sent: false, why: "outside 8am-9pm for the recipient; queued to send when texting is allowed" });
     await store.setOptOut(CALLER, true);
     expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_10AM }, business, CALLER, "x")).toEqual({ sent: false, why: "caller opted out" });
   });
@@ -456,7 +456,7 @@ describe("legal fixes", () => {
     const { buildStubAssistant } = await import("../src/vapi/assistant.js");
     const { deps } = setup();
     for (const canTransfer of [true, false]) {
-      const a = buildStubAssistant(deps.env, deps.businesses[0]!, { canTransfer }) as any;
+      const a = buildStubAssistant(deps.env, deps.businesses[0]!, { canTransfer, now: new Date() }) as any;
       const p = a.model.messages[0].content as string;
       expect(p).toContain("911");
       expect(p).toContain("no medical, legal, tax or financial advice");
@@ -473,5 +473,114 @@ describe("admin delete", () => {
     expect((await post({})).status).toBe(401);
     expect((await post({ Authorization: "Bearer adm" })).status).toBe(200);
     expect(await store.getCall("c9")).toBeUndefined();
+  });
+});
+
+describe("fix round 1", () => {
+  const post = (app: ReturnType<typeof createApp>, path: string, form: Record<string, string>) =>
+    app.request(path, { method: "POST", body: new URLSearchParams(form), headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+  const msg = (args: Record<string, unknown>) => ({
+    message: { type: "tool-calls", call, toolCallList: [{ id: "t1", function: { name: "take_message", arguments: args } }] },
+  });
+  const failingEmail = (): { deps: Deps; sent: Sent[] } => {
+    const { deps, sent } = setup();
+    const ok = deps.notify;
+    deps.notify = { ...ok, async email(to, subject, body) { return { channel: "email", to, subject, body, dryRun: false, ok: false, error: "Resend 500" }; } };
+    return { deps, sent };
+  };
+
+  it("keeps a message when email fails, and falls back to SMS", async () => {
+    const { deps, sent } = failingEmail();
+    await handleVapi(deps, msg({ name: "Dana", callback: "+14805550123", message: "call me about a website" }));
+    expect(sent.filter((s) => s.channel === "sms" && s.to === OWNER && s.body.includes("call me about a website"))).toHaveLength(1);
+    const saved = await deps.store.getCall("call-1");
+    expect(saved?.message).toMatchObject({ name: "Dana", text: "call me about a website", delivered: "sms" });
+  });
+
+  it("keeps a message even when nothing can be sent", async () => {
+    const { deps } = failingEmail();
+    deps.businesses[0]!.ownerPhone = "";
+    await handleVapi(deps, msg({ name: "Dana", message: "hello" }));
+    expect((await deps.store.getCall("call-1"))?.message).toMatchObject({ text: "hello", delivered: "none" });
+  });
+
+  it("does not treat ordinary replies as opt-outs, and forwards them", async () => {
+    for (const body of ["Can you stop by Tuesday? text me the price", "Do not have email, please text me a time", "dont call me, text me instead", "yes"]) {
+      const { deps, sent } = setup();
+      await post(createApp(deps), "/twilio/sms", { To: NUMBER, From: CALLER, Body: body });
+      expect(await deps.store.isOptedOut(CALLER)).toBe(false);
+      expect(sent.some((s) => s.to === OWNER && s.body.includes(body))).toBe(true);
+    }
+  });
+
+  it("opts out on clear requests, confirms, and still tells the owner", async () => {
+    const { deps, sent } = setup();
+    const res = await (await post(createApp(deps), "/twilio/sms", { To: NUMBER, From: CALLER, Body: "please stop texting me" })).text();
+    expect(await deps.store.isOptedOut(CALLER)).toBe(true);
+    expect(res).toContain("opted out");
+    expect(sent.some((s) => s.to === OWNER && s.body.includes("Possible opt-out"))).toBe(true);
+  });
+
+  it("owner PAUSE and booking keys survive a restart", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const file = `${mkdtempSync(`${tmpdir()}/st-`)}/state.json`;
+    const a = memoryStore(file);
+    await a.setFlag("paused:wright-ai", "now");
+    await a.saveCall({ callId: "c9", businessId: "wright-ai", caller: CALLER, startedAt: "2026-11-10T17:00:00Z", outcome: "message" });
+    await a.recordEvent("wright-ai", "text", CALLER, TUESDAY_10AM);
+    const b = memoryStore(file);
+    expect(await b.getFlag("paused:wright-ai")).toBe("now");
+    expect((await b.getCall("c9"))?.outcome).toBe("message");
+    expect(await b.lastTextTo("wright-ai", CALLER)).toEqual(TUESDAY_10AM);
+  });
+
+  it("emails the owner a summary at the end of each call", async () => {
+    const { deps, sent } = setup();
+    await handleVapi(deps, { message: { type: "end-of-call-report", call, endedReason: "assistant-ended-call", analysis: { summary: "Asked about pricing." }, artifact: { recordingUrl: "https://rec.example/1", messages: [{ role: "user" }, { role: "user" }] } } });
+    const mail = sent.find((s) => s.channel === "email");
+    expect(mail?.body).toContain("Asked about pricing.");
+    expect(mail?.body).toContain("https://rec.example/1");
+  });
+
+  it("queues an after-hours text-back and sends it when the window opens", async () => {
+    const { deps, sent, store } = setup();
+    const business = deps.businesses[0]!;
+    await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_11PM }, business, CALLER, "no-answer");
+    expect(sent.filter((s) => s.to === CALLER)).toHaveLength(0);
+    expect(await flushDeferredTextBacks({ store, notify: deps.notify, now: () => TUESDAY_11PM }, deps.businesses)).toBe(0);
+    const next = new Date(TUESDAY_11PM.getTime() + 15 * 3600_000); // ~10am Phoenix next day
+    expect(await flushDeferredTextBacks({ store, notify: deps.notify, now: () => next }, deps.businesses)).toBe(1);
+    expect(sent.filter((s) => s.to === CALLER)).toHaveLength(1);
+  });
+
+  it("books without a phone number when caller ID is hidden", async () => {
+    let body = "";
+    const route: Route = (url, init) => {
+      if (!url.includes("/v2/bookings")) return undefined;
+      body = String(init?.body);
+      return Response.json({ data: { uid: "u1", status: "accepted" } });
+    };
+    const { deps } = setup({ routes: [route], env: { CAL_API_KEY: "k" } });
+    const hidden = { id: "call-h", phoneNumber: { number: NUMBER } };
+    await handleVapi(deps, { message: { type: "tool-calls", call: hidden, toolCallList: [{ id: "t", function: { name: "book_discovery_call", arguments: { start: "2026-11-11T21:00:00.000Z", name: "Dana", email: "d@x.com", need: "site" } } }] } });
+    expect(body).not.toContain("unknown");
+  });
+
+  it("status endpoint needs the admin secret and reports real state", async () => {
+    const { deps } = setup({ env: { ADMIN_SECRET: "s3cret", APP_VERSION: "abc123" } });
+    deps.fetch = fakeFetch([() => new Response("x", { status: 401 })]);
+    const app = createApp(deps);
+    expect((await app.request("/admin/status.json")).status).toBe(401);
+    const res = await app.request("/admin/status.json", { headers: { Authorization: "Bearer s3cret" } });
+    const j = (await res.json()) as any;
+    expect(j.version).toBe("abc123");
+    expect(j.calCom).toBe("reachable");
+    expect(j.latestUpdate).toContain("Latest Update");
+  });
+
+  it("/health fails when live config is missing", async () => {
+    const { deps } = setup({ env: { DRY_RUN: "false" } });
+    expect((await createApp(deps).request("/health")).status).toBe(503);
   });
 });

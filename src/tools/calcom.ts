@@ -69,7 +69,7 @@ export type BookingResult =
  */
 export async function bookCall(
   cal: CalEvent,
-  booking: { start: string; name: string; email: string; phone: string; timeZone: string; notes: string },
+  booking: { start: string; name: string; email: string; phone?: string; timeZone: string; notes: string },
   apiKey?: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<BookingResult> {
@@ -82,7 +82,7 @@ export async function bookCall(
           headers: headers(apiKey, "2026-02-25"),
           body: JSON.stringify({
             start: booking.start,
-            attendee: { name: booking.name, email: booking.email, timeZone: booking.timeZone, phoneNumber: booking.phone, language: "en" },
+            attendee: { name: booking.name, email: booking.email, timeZone: booking.timeZone, ...(booking.phone ? { phoneNumber: booking.phone } : {}), language: "en" },
             eventTypeSlug: cal.slug,
             username: cal.username,
             bookingFieldsResponses: { notes: booking.notes },

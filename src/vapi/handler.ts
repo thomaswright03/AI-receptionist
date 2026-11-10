@@ -78,15 +78,17 @@ async function assistantRequest(deps: Deps, m: VapiMessage): Promise<Record<stri
   if (!business) return { error: "This number is not set up yet." };
   const callsToday = await deps.store.countSince(business.id, "call", new Date(now.getTime() - 24 * 60 * 60 * 1000));
   await deps.store.recordEvent(business.id, "call", callerOf(m), now);
-  if (callsToday >= business.caps.callsPerDay && business.ownerPhone) {
-    // Over the daily cap: the owner takes the call instead of the agent.
-    return { destination: { type: "number", number: business.ownerPhone } };
+  await deps.store.setFlag(`last-call-at:${business.id}`, now.toISOString());
+  if (callsToday >= business.caps.callsPerDay) {
+    // Over the daily cap: the owner takes the call instead of the agent; with no owner phone, the agent only takes a message.
+    if (business.ownerPhone) return { destination: { type: "number", number: business.ownerPhone } };
+    return { assistant: buildStubAssistant(deps.env, business, { canTransfer: false, now }) };
   }
   if (m.call?.id) {
     await deps.store.saveCall({ callId: m.call.id, businessId: business.id, caller: callerOf(m), startedAt: now.toISOString(), outcome: "unknown", disclosureVersion: DISCLOSURE_VERSION, disclosedAt: now.toISOString() });
   }
   const canTransfer = Boolean(business.ownerPhone) && withinHours(business.transferHours, now, business.timeZone);
-  if (deps.env.AGENT_MODE === "stub") return { assistant: buildStubAssistant(deps.env, business, { canTransfer }) };
+  if (deps.env.AGENT_MODE === "stub") return { assistant: buildStubAssistant(deps.env, business, { canTransfer, now }) };
   const flow = getFlow(business.flowId);
   const times = business.cal
     ? await openTimes(business.cal, now, new Date(now.getTime() + WEEK), deps.env.CAL_API_KEY, deps.fetch)
@@ -105,9 +107,17 @@ async function toolCalls(deps: Deps, m: VapiMessage): Promise<Record<string, unk
     } catch {
       /* leave empty; the tool reports what's missing */
     }
-    const result = business
-      ? await runTool(deps, business, m, call.function?.name ?? "", args)
-      : { ok: false, say: "Something went wrong on our side. Please call back in a few minutes." };
+    const failed = { ok: false, say: "Something went wrong on our side. Take a message with take_message, or ask them to call back in a few minutes." };
+    let result: Record<string, unknown> = failed;
+    if (business) {
+      try {
+        result = await runTool(deps, business, m, call.function?.name ?? "", args);
+      } catch (err) {
+        console.error(JSON.stringify({ event: "tool.error", tool: call.function?.name, callId: m.call?.id, err: String(err) }));
+        const from = business.inboundNumbers[0];
+        if (from && business.ownerPhone) await deps.notify.sms(business.ownerPhone, from, `The receptionist hit an error during a call from ${callerOf(m)} (${call.function?.name}). Please check on them.`).catch(() => undefined);
+      }
+    }
     results.push({ toolCallId: call.id, result: JSON.stringify(result) });
   }
   return { results };
@@ -133,7 +143,7 @@ async function runTool(
     // One stable key per booking attempt: a retried tool call, or the model
     // calling twice, never books twice. A pending or unclear attempt is never
     // retried from the call; the owner reconciles it in Cal.com.
-    const key = `booking:${business.id}:${callId ?? caller}:${start}:${email.trim().toLowerCase()}`;
+    const key = `booking:${business.id}:${callId ?? "no-call-id"}:${start}:${email.trim().toLowerCase()}`;
     const prior = await deps.store.getFlag(key);
     const callBooked = callId ? await deps.store.getFlag(`booked-call:${callId}`) : undefined;
     if (prior?.startsWith("booked") || callBooked) {
@@ -149,7 +159,7 @@ async function runTool(
         start,
         name: who,
         email: email.trim(),
-        phone: caller,
+        phone: /^\+\d{8,15}$/.test(caller) ? caller : undefined,
         timeZone: business.timeZone,
         notes: `Booked by phone (AI receptionist). Business: ${business_name ?? "not given"}. Need: ${need}`,
       },
@@ -189,11 +199,25 @@ async function runTool(
     const who = args.name ?? "Unknown caller";
     const back = args.callback_number || caller;
     const urgent = String(args.urgent) === "true";
-    if (callId) await deps.store.saveCall({ ...(await baseCall(deps, callId, business, caller)), outcome: "message" });
-    // Urgent messages text the owner now; routine ones go to email.
-    if (urgent && from && business.ownerPhone) await deps.notify.sms(business.ownerPhone, from, `URGENT message from ${who} (${back}): ${args.message ?? ""}`);
-    await deps.notify.email(business.ownerEmail, `${urgent ? "URGENT " : ""}Phone message: ${who}`, `${who}\n${back}\n\n${args.message ?? ""}`);
-    return { ok: true, say: "Message passed on. Tell them the owner will call them back, today if possible." };
+    const text = args.message ?? "";
+    // Save first, so the message exists even if every notification fails.
+    const record = { name: who, callback: back, text, urgent, delivered: "none" as "email" | "sms" | "none", at: (deps.now?.() ?? new Date()).toISOString() };
+    const id = callId ?? `nocall-${record.at}-${caller}`;
+    await deps.store.saveCall({ ...(await baseCall(deps, id, business, caller)), outcome: "message", message: record });
+    let delivered: "email" | "sms" | "none" = "none";
+    const subject = `${urgent ? "URGENT " : ""}Phone message: ${who}`;
+    const body = `${who}\n${back}\n\n${text}`;
+    const smsText = `${urgent ? "URGENT message" : "Message"} from ${who} (${back}): ${text}`;
+    // Urgent messages text the owner now; routine ones go to email, falling back to SMS if email fails.
+    if (urgent && from && business.ownerPhone && (await deps.notify.sms(business.ownerPhone, from, smsText)).ok) delivered = "sms";
+    const emailed = await deps.notify.email(business.ownerEmail, subject, body);
+    if (emailed.ok) delivered = "email";
+    else if (delivered === "none" && from && business.ownerPhone && (await deps.notify.sms(business.ownerPhone, from, smsText)).ok) delivered = "sms";
+    if (delivered !== "none") await deps.store.saveCall({ ...(await baseCall(deps, id, business, caller)), message: { ...record, delivered } });
+    if (!emailed.ok || delivered === "none") {
+      console.error(JSON.stringify({ event: "message.delivery-failed", callId: id, emailError: emailed.error, delivered, saved: true }));
+    }
+    return { ok: true, say: delivered === "none" ? "Message taken. Tell them the owner will call them back, today if possible." : "Message passed on. Tell them the owner will call them back, today if possible." };
   }
   return { ok: false, say: "Unknown tool." };
 }
@@ -240,4 +264,15 @@ async function endOfCall(deps: Deps, m: VapiMessage): Promise<void> {
     transcript: m.artifact?.transcript,
     recordingUrl: m.artifact?.recordingUrl,
   });
+  // The owner can always see what happened: one short email per call.
+  const lines = [
+    `Outcome: ${outcome}`,
+    `Caller: ${caller}`,
+    `Ended: ${m.endedReason ?? "unknown"}`,
+    `Summary: ${m.analysis?.summary ?? "(none)"}`,
+    ...(existing.message ? [`Message left: ${existing.message.name}, ${existing.message.callback}: ${existing.message.text}`] : []),
+    ...(m.artifact?.recordingUrl ? [`Recording: ${m.artifact.recordingUrl}`] : []),
+  ];
+  const sent = await deps.notify.email(business.ownerEmail, `Call summary: ${caller} (${outcome})`, lines.join("\n"));
+  if (!sent.ok) console.error(JSON.stringify({ event: "call-summary.email-failed", callId, error: sent.error }));
 }

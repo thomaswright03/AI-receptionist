@@ -185,7 +185,7 @@ export function buildAssistant(
     voice: business.voice,
     transcriber: { provider: "deepgram", model: "nova-3", language: "en" },
     server: toolServer,
-    serverMessages: ["end-of-call-report", "status-update", "tool-calls"],
+    serverMessages: ["end-of-call-report", "tool-calls"],
     silenceTimeoutSeconds: 20,
     maxDurationSeconds: 900,
     metadata: { businessId: business.id, flowId: flow.id },
@@ -200,10 +200,10 @@ export function buildAssistant(
 export function buildStubAssistant(
   env: Env,
   business: Business,
-  ctx: { canTransfer: boolean },
+  ctx: { canTransfer: boolean; now: Date },
 ): Record<string, unknown> {
   const full = buildAssistant(env, business, { id: "stub", purpose: "", questions: [], tools: ["take_message"], rules: [] }, {
-    now: new Date(),
+    now: ctx.now,
     openTimes: null,
     canTransfer: ctx.canTransfer,
   });

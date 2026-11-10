@@ -9,9 +9,12 @@ Plan: https://claude.ai/artifact/91wucVfWdBXVbStkszR8Ta (final 2026-11-10; next 
   agent (`AGENT_MODE=stub`); full assistant with disclosure first, FAQ, transfer
   rules, open times preloaded; idempotent booking; urgent vs routine alerts;
   missed-call text-back; STOP; caps; signature checks; per-dependency timeouts.
-- `db/schema.sql` loads cleanly on Postgres 16; the code still uses the
-  in-memory store (`src/store.ts`).
+- State persists in a JSON file (`STATE_FILE`, on a Fly volume); `db/schema.sql` removed (Postgres only if volume demands).
 - Nothing has run against real Vapi, Twilio or Cal.com yet.
+
+## Excellence fix round 1 (2026-11-10), 57 tests pass
+Fixed: message persistence + SMS fallback + startup refusal; narrowed STOP regex (intent forwarded + confirmed); STATE_FILE persistence; per-call summary email; tool-error alerts; /admin/status.json (+ Latest Update from docs/latest-update.md, keep both it and README in sync each round); /health reflects config; deferred after-hours text-backs; stub uses injected now; hidden caller ID omitted from bookings; over-cap without owner phone; removed check_availability/status-update/schema.sql.
+Still open: deploy (Fly token / Render), live QA, backups of STATE_FILE volume (Fly snapshots), booking SMS ignores quiet hours (Legal).
 
 ## Legal fix round 2 (2026-11-10)
 Done: /vapi fails closed; one opt-out gate for all caller SMS; opt-outs persist (OPTOUT_FILE, needs a Fly volume at /data); strict quiet hours; basis recorded; stub safety rules; /admin/export|delete; docs aligned; README Latest Update. 47 tests pass.

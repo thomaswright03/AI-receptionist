@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { Hono } from "hono";
 import { validTwilioSignature } from "./twilio/signature.js";
 import * as twilio from "./twilio/routes.js";
+import { agentPaused } from "./safety/killswitch.js";
 import { handleVapi, type Deps } from "./vapi/handler.js";
 
 function sameSecret(a: string, b: string | undefined): boolean {
@@ -15,7 +16,56 @@ function sameSecret(a: string, b: string | undefined): boolean {
 export function createApp(deps: Deps): Hono {
   const app = new Hono();
 
-  app.get("/health", (c) => c.json({ ok: true, dryRun: deps.env.DRY_RUN !== "false", businesses: deps.businesses.map((b) => b.id) }));
+  // Config the service can't safely run live without. Only enforced when DRY_RUN=false.
+  const missingConfig = () => {
+    const miss: string[] = [];
+    if (!deps.env.VAPI_SECRET) miss.push("VAPI_SECRET");
+    if (!deps.env.TWILIO_AUTH_TOKEN || !deps.env.TWILIO_ACCOUNT_SID) miss.push("TWILIO_*");
+    if (!deps.env.RESEND_API_KEY) miss.push("RESEND_API_KEY");
+    if (!deps.env.STATE_FILE) miss.push("STATE_FILE");
+    for (const b of deps.businesses) if (!b.ownerEmail) miss.push(`owner email (${b.id})`);
+    return miss;
+  };
+
+  app.get("/health", (c) => {
+    const dryRun = deps.env.DRY_RUN !== "false";
+    const missing = dryRun ? [] : missingConfig();
+    return c.json({ ok: missing.length === 0, dryRun, missing, version: deps.env.APP_VERSION }, missing.length ? 503 : 200);
+  });
+
+  // Owner/operator status: real checks, behind ADMIN_SECRET.
+  app.get("/admin/status.json", async (c) => {
+    const auth = c.req.header("authorization")?.replace(/^Bearer /, "") ?? "";
+    if (!deps.env.ADMIN_SECRET || !sameSecret(auth, deps.env.ADMIN_SECRET)) return c.json({ error: "unauthorized" }, 401);
+    let cal: string;
+    try {
+      await (deps.fetch ?? fetch)("https://api.cal.com/v2/slots", { signal: AbortSignal.timeout(3000) });
+      cal = "reachable";
+    } catch (err) {
+      cal = `unreachable: ${String(err)}`;
+    }
+    const businesses = await Promise.all(
+      deps.businesses.map(async (b) => ({
+        id: b.id,
+        paused: await agentPaused(deps, b).catch((err: unknown) => ({ paused: true, why: String(err) })),
+        lastCallAt: (await deps.store.getFlag(`last-call-at:${b.id}`)) ?? null,
+        queuedTextBacks: (await deps.store.listFlags(`deferred-textback:${b.id}|`)).length,
+      })),
+    );
+    const latestUpdate = await readFile(new URL("../docs/latest-update.md", import.meta.url), "utf8").catch(() => null);
+    return c.json({
+      version: deps.env.APP_VERSION,
+      dryRun: deps.env.DRY_RUN !== "false",
+      agentMode: deps.env.AGENT_MODE,
+      killSwitch: deps.env.KILL_SWITCH,
+      watchdog: deps.watchdog ? { healthy: deps.watchdog.healthy, lastError: deps.watchdog.lastError ?? null } : "off",
+      config: { twilio: Boolean(deps.env.TWILIO_AUTH_TOKEN), resend: Boolean(deps.env.RESEND_API_KEY), calApiKey: Boolean(deps.env.CAL_API_KEY), stateFile: Boolean(deps.env.STATE_FILE) },
+      missingConfig: missingConfig(),
+      calCom: cal,
+      businesses,
+      latestUpdate,
+    });
+  });
 
   // Public legal documents (linked from the text-back and the 10DLC registration).
   for (const [path, file] of [["/privacy", "privacy.md"], ["/terms", "terms.md"]] as const) {

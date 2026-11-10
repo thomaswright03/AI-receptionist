@@ -65,7 +65,7 @@ static TwiML Bin dialing the owner) answers instead.
 - Twilio webhooks require a valid `X-Twilio-Signature`; Vapi messages require
   `X-Vapi-Secret` when `VAPI_SECRET` is set.
 
-Schema: `db/schema.sql` (Postgres; the code still uses the in-memory store).
+State: a JSON file (`STATE_FILE`) on a persistent volume; swap in Postgres behind the `Store` interface when volume grows.
 
 ## Run
 
@@ -84,10 +84,11 @@ QA call script: `docs/qa-cases.md`. Status and what's next: `STATE.md`.
 ## Legal
 Privacy notice: `docs/legal/privacy.md` (served at `/privacy`); terms: `docs/legal/terms.md` (`/terms`). Also in `docs/legal/`: applicable law, contracts register, vendors, messaging, claims, data inventory, breach plan.
 
-## Latest Update (2026-11-10)
-- No frontend changes in this round (there is no web UI).
-- `/vapi` now refuses requests (503) when `DRY_RUN=false` and `VAPI_SECRET` is unset.
-- Every text to a caller goes through one opt-out check (booking confirmations included); opt-outs persist in `OPTOUT_FILE`; texts are sent only inside 8am-9pm across US time zones; text-backs record their basis.
-- Week-1 stub prompts now send emergencies to 911 and give no advice or promises.
-- New operator endpoints `POST /admin/export` and `/admin/delete` (by phone number, `ADMIN_SECRET`).
-- Legal documents corrected to match the code (Deepgram, Resend, planned services, training wording, terms licences/indemnity).
+## Latest Update (2026-11-10, fix round 1)
+- No frontend changes (there is no web UI). The owner-facing status area is `GET /admin/status.json` (Bearer `ADMIN_SECRET`): version, kill switch, watchdog, last call time, queued text-backs, config present, Cal.com reachability and this section.
+- Caller messages are saved on the call record before any notification; email failure falls back to SMS and is logged; `DRY_RUN=false` refuses to start without an owner email and `STATE_FILE`.
+- STOP detection narrowed: only carrier keywords and clear "stop texting me" phrases opt out; the latter are forwarded to the owner as a possible opt-out and confirmed to the sender. "yes" is no longer a START word, so it reaches the owner.
+- All state (calls, messages, PAUSE flag, booking keys, caps, opt-outs) persists in `STATE_FILE` (put on a volume).
+- The owner gets a summary email per call; tool errors text the owner; `/health` returns 503 when live config is missing.
+- Missed calls outside texting hours are queued and sent when the window opens (within 24 h).
+- Booking omits an unknown caller number and keys on the call id; over-cap calls without an owner phone get message-taking only; removed the unused `check_availability` and `status-update` and the unused `db/schema.sql`.

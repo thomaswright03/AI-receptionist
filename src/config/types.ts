@@ -8,7 +8,7 @@
 
 import type { WeeklyHours } from "../safety/hours.js";
 
-export type ToolName = "check_availability" | "book_discovery_call" | "take_message";
+export type ToolName = "book_discovery_call" | "take_message";
 
 export interface Flow {
   id: string;

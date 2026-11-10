@@ -31,7 +31,11 @@ export async function missedCallTextBack(
     if (!from) return { sent: false, why: "business has no number" };
     if (!/^\+1\d{10}$/.test(caller)) return { sent: false, why: "caller number is hidden or not a US mobile format" };
     if (await deps.store.isOptedOut(caller)) return { sent: false, why: "caller opted out" };
-    if (!textingAllowed(now, business.timeZone, caller)) return { sent: false, why: "outside 8am-9pm for the recipient" };
+    if (!textingAllowed(now, business.timeZone, caller)) {
+      // Not lost: queued, and sent by flushDeferredTextBacks when the window opens (within 24 hours).
+      await deps.store.setFlag(`${DEFERRED}${business.id}|${caller}`, JSON.stringify({ at: now.toISOString(), reason, callId }));
+      return { sent: false, why: "outside 8am-9pm for the recipient; queued to send when texting is allowed" };
+    }
     const last = await deps.store.lastTextTo(business.id, caller);
     if (last && now.getTime() - last.getTime() < DAY) return { sent: false, why: "already texted in the last 24 hours" };
     const today = await deps.store.countSince(business.id, "text", new Date(now.getTime() - DAY));
@@ -41,6 +45,29 @@ export async function missedCallTextBack(
     await deps.store.recordEvent(business.id, "text", caller, now, "reply_to_inbound_call", callId);
     return { sent: true };
   }
+}
+
+const DEFERRED = "deferred-textback:";
+
+/** Sends queued text-backs whose window has opened; drops ones older than 24 hours. Run every minute. */
+export async function flushDeferredTextBacks(
+  deps: { store: Store; notify: Notifier; now?: () => Date },
+  businesses: Business[],
+): Promise<number> {
+  const now = deps.now?.() ?? new Date();
+  let handled = 0;
+  for (const [key, raw] of await deps.store.listFlags(DEFERRED)) {
+    const [businessId, caller] = key.slice(DEFERRED.length).split("|") as [string, string];
+    const business = businesses.find((b) => b.id === businessId);
+    const item = JSON.parse(raw) as { at: string; reason: string; callId?: string };
+    if (!business) { await deps.store.setFlag(key, undefined); continue; }
+    if (now.getTime() - new Date(item.at).getTime() > DAY) { await deps.store.setFlag(key, undefined); continue; }
+    if (!textingAllowed(now, business.timeZone, caller)) continue;
+    await deps.store.setFlag(key, undefined);
+    await missedCallTextBack({ store: deps.store, notify: deps.notify, now }, business, caller, `${item.reason}, queued overnight`, item.callId);
+    handled++;
+  }
+  return handled;
 }
 
 /** The one door for texts to callers: never to an opted-out number. */
@@ -56,19 +83,30 @@ export async function sendCallerSms(
 }
 
 const STOP_WORDS = /^\s*(stop|stopall|unsubscribe|cancel|end|quit|revoke|optout|opt[- ]out)\s*$/i;
-// Plain requests such as "stop texting me" or "please don't text me again".
-const STOP_INTENT = /\b(stop|quit|cease|don'?t|do not|no more|remove me|take me off|leave me alone)\b.{0,30}\b(text|texts|texting|message|messages|messaging|contact|contacting|calling|list)\b|\bopt me out\b|\bunsubscribe\b/i;
-const START_WORDS = /^\s*(start|unstop|yes)\s*$/i;
+// Plain requests that are unmistakably about texting: "stop texting me", "please don't text me again".
+// Deliberately narrow: "can you stop by Tuesday? text me the price" must not match.
+const STOP_INTENT = /\b(stop|quit|cease|don'?t|do not|no more)\s+(texting|messaging|text|message)\s+(me|us)\b|\b(remove me|take me off)\s+(from\s+)?(your|the|this)\s+(list|texts?)\b|\bopt me out\b|\bunsubscribe me\b|\bleave me alone\b/i;
+const START_WORDS = /^\s*(start|unstop)\s*$/i;
 
-/** Handles STOP/START on inbound texts. Returns true when the message was an opt-out keyword. */
-export async function handleOptOut(store: Store, from: string, body: string): Promise<boolean> {
-  if (STOP_WORDS.test(body) || STOP_INTENT.test(body)) {
+export type OptOutKind = "keyword" | "intent" | "start" | null;
+
+/**
+ * Handles STOP/START on inbound texts. Exact carrier keywords opt out silently. Plain-language
+ * requests also opt out but are reported as "intent" so the caller can forward the text to the
+ * owner and confirm. Anything else returns null and is forwarded.
+ */
+export async function handleOptOut(store: Store, from: string, body: string): Promise<OptOutKind> {
+  if (STOP_WORDS.test(body)) {
     await store.setOptOut(from, true);
-    return true;
+    return "keyword";
+  }
+  if (STOP_INTENT.test(body)) {
+    await store.setOptOut(from, true);
+    return "intent";
   }
   if (START_WORDS.test(body)) {
     await store.setOptOut(from, false);
-    return true;
+    return "start";
   }
-  return false;
+  return null;
 }

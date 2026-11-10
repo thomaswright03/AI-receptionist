@@ -16,6 +16,10 @@ const schema = z.object({
   VAPI_TWILIO_INBOUND_URL: z.string().url().default("https://api.vapi.ai/twilio/inbound_call"),
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
+  /** File that keeps ALL state (calls, messages, PAUSE flag, booking keys, opt-outs) across restarts. Put it on a persistent volume. Empty = memory only. */
+  STATE_FILE: z.string().optional(),
+  /** Version shown in /admin/status.json (set to the commit at deploy). */
+  APP_VERSION: z.string().default("dev"),
   /** File that keeps opt-outs across restarts (put it on a Fly volume). Empty = memory only. */
   OPTOUT_FILE: z.string().optional(),
   /** Bearer token for /admin/export and /admin/delete (by phone number). Routes are off when unset. */

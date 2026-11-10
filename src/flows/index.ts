@@ -12,7 +12,7 @@ export const discoveryCall: Flow = {
     "the problem they want help with, in their own words",
     "a good email address for the calendar invite (spell it back letter by letter to confirm)",
   ],
-  tools: ["check_availability", "book_discovery_call", "take_message"],
+  tools: ["book_discovery_call", "take_message"],
   rules: [
     "Never quote prices, timelines or promise results. Say the owner covers that on the discovery call.",
     "Offer at most three open times at once, read in the caller's words (for example 'Thursday at 2 PM').",

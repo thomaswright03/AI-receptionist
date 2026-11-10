@@ -84,7 +84,13 @@ export async function sms(deps: Deps, p: Params): Promise<string> {
     const reply = await ownerCommand(deps, business, body);
     if (reply) return twiml(`<Message>${xml(reply)}</Message>`);
   }
-  if (await handleOptOut(deps.store, from, body)) return twiml("");
+  const optOut = await handleOptOut(deps.store, from, body);
+  if (optOut === "keyword" || optOut === "start") return twiml("");
+  if (optOut === "intent") {
+    // Opted out, but a person should see it in case it was misread.
+    if (business?.ownerPhone && p.To) await deps.notify.sms(business.ownerPhone, p.To, `Possible opt-out from ${from} (they are now opted out): ${body}`);
+    return twiml("<Message>You're opted out and won't get more texts from us. Reply START to opt back in.</Message>");
+  }
   if (business?.ownerPhone && p.To) {
     await deps.notify.sms(business.ownerPhone, p.To, `Text from ${from}: ${body}`);
   }
