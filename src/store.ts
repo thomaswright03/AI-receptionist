@@ -1,8 +1,17 @@
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
-// What the service remembers between requests. In memory for now so the
-// whole call path can be built and tested; the Postgres version (week 1)
-// implements the same interface, so nothing else changes when it lands.
+// What the service remembers between requests: in memory, optionally mirrored to a JSON
+// file (STATE_FILE) on a persistent disk. Another backend can implement the same Store interface.
+
+/** Throws if the state file's directory can't be created or written; call at start-up so a bad mount stops the service early. */
+export function assertWritable(file: string): void {
+  mkdirSync(dirname(file), { recursive: true });
+  accessSync(dirname(file), constants.W_OK);
+}
+
+/** Drop calls and events older than `days`; returns how many were removed. */
+export const RETENTION_DAYS = 90;
 
 export type CallOutcome = "booked" | "transferred" | "message" | "abandoned" | "text-back" | "unknown";
 
@@ -17,6 +26,9 @@ export interface CallRecord {
   summary?: string;
   transcript?: string;
   recordingUrl?: string;
+  /** From Vapi's end-of-call report. */
+  costUsd?: number;
+  durationSeconds?: number;
   /** Wording version of the AI + recording disclosure played at the start of the call, and when. */
   disclosureVersion?: string;
   disclosedAt?: string;
@@ -40,6 +52,12 @@ export interface Store {
   getFlag(key: string): Promise<string | undefined>;
   setFlag(key: string, value: string | undefined): Promise<void>;
   listFlags(prefix: string): Promise<[string, string][]>;
+  /** Outcome counts since a time, for the owner's status and weekly summary. */
+  outcomesSince(businessId: string, since: Date): Promise<Record<string, number>>;
+  /** Removes calls and events older than the cutoff. Returns how many were removed. */
+  sweep(before: Date): Promise<number>;
+  /** Set when the last write to disk failed. */
+  lastPersistError?: string;
 }
 
 /**
@@ -65,13 +83,21 @@ export function memoryStore(file?: string): Store {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; // a corrupt state file must stop start-up, not be overwritten
     }
   }
+  // A failed write is logged loudly but never fails the call in progress; state stays in memory.
   const persist = () => {
     if (!file) return;
-    const tmp = `${file}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ calls: [...calls.values()], events, optedOut: [...optedOut], flags: [...flags] }));
-    renameSync(tmp, file);
+    try {
+      const tmp = `${file}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ calls: [...calls.values()], events, optedOut: [...optedOut], flags: [...flags] }));
+      renameSync(tmp, file);
+      store.lastPersistError = undefined;
+    } catch (err) {
+      store.lastPersistError = String(err);
+      console.error(JSON.stringify({ event: "store.persist.failed", file, err: String(err) }));
+    }
   };
   const store: Store = {
+    lastPersistError: undefined,
     async saveCall(call) {
       calls.set(call.callId, { ...calls.get(call.callId), ...call });
       persist();
@@ -100,6 +126,23 @@ export function memoryStore(file?: string): Store {
       persist();
       return n; // opt-out status is kept on purpose so the number is still never texted
     },
+    async outcomesSince(businessId, since) {
+      const out: Record<string, number> = {};
+      for (const c of calls.values()) {
+        if (c.businessId !== businessId || new Date(c.startedAt) < since) continue;
+        out[c.outcome] = (out[c.outcome] ?? 0) + 1;
+        if (c.message) out["messages"] = (out["messages"] ?? 0) + 1;
+      }
+      out["texts"] = events.filter((e) => e.businessId === businessId && e.kind === "text" && e.at >= since).length;
+      return out;
+    },
+    async sweep(before) {
+      let n = 0;
+      for (const [id, c] of calls) if (new Date(c.startedAt) < before) { calls.delete(id); n++; }
+      for (let i = events.length - 1; i >= 0; i--) if (events[i]!.at < before) { events.splice(i, 1); n++; }
+      if (n) persist();
+      return n;
+    },
     async lastTextTo(businessId, to) {
       const sent = events.filter((e) => e.businessId === businessId && e.kind === "text" && e.to === to);
       return sent.at(-1)?.at;
@@ -125,27 +168,4 @@ export function memoryStore(file?: string): Store {
     },
   };
   return store;
-}
-
-/** Wraps a store so opt-outs survive restarts: they are loaded from, and written to, a JSON file. */
-export function withPersistentOptOuts(inner: Store, file: string): Store {
-  const loaded = new Set<string>();
-  try {
-    for (const p of JSON.parse(readFileSync(file, "utf8")) as string[]) loaded.add(p);
-  } catch {
-    /* no file yet */
-  }
-  const save = () => writeFileSync(file, JSON.stringify([...loaded]));
-  return {
-    ...inner,
-    async isOptedOut(phone) {
-      return loaded.has(phone) || inner.isOptedOut(phone);
-    },
-    async setOptOut(phone, value) {
-      if (value) loaded.add(phone);
-      else loaded.delete(phone);
-      save();
-      await inner.setOptOut(phone, value);
-    },
-  };
 }

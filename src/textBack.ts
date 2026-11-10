@@ -7,7 +7,7 @@ const DAY = 24 * 60 * 60 * 1000;
 
 export type TextBackResult = { sent: true } | { sent: false; why: string };
 
-// Texts a caller whose call was missed, once a day at most, never to an
+// Texts a caller whose call was missed, at most once in any rolling 24 hours, never to an
 // opted-out number, never outside 8am-9pm local, never past the daily cap.
 // The owner is alerted either way, so a missed call never goes unseen.
 export async function missedCallTextBack(
@@ -20,7 +20,10 @@ export async function missedCallTextBack(
   const now = deps.now ?? new Date();
   const from = business.inboundNumbers[0];
   const result = await decide();
-  if (result.sent === false && from && business.ownerPhone) {
+  const queued = result.sent === false && result.why.startsWith("outside 8am-9pm");
+  if (queued && from && business.ownerPhone) {
+    await deps.notify.sms(business.ownerPhone, from, `Missed call from ${caller} (${reason}). Texting is closed now; they will be texted back when it opens.`);
+  } else if (result.sent === false && from && business.ownerPhone) {
     await deps.notify.sms(business.ownerPhone, from, `Missed call from ${caller} (${reason}). No text-back sent: ${result.why}.`);
   } else if (from && business.ownerPhone) {
     await deps.notify.sms(business.ownerPhone, from, `Missed call from ${caller} (${reason}). They were texted back.`);
@@ -59,7 +62,15 @@ export async function flushDeferredTextBacks(
   for (const [key, raw] of await deps.store.listFlags(DEFERRED)) {
     const [businessId, caller] = key.slice(DEFERRED.length).split("|") as [string, string];
     const business = businesses.find((b) => b.id === businessId);
-    const item = JSON.parse(raw) as { at: string; reason: string; callId?: string };
+    let item: { at: string; reason: string; callId?: string };
+    try {
+      item = JSON.parse(raw) as typeof item;
+      if (Number.isNaN(new Date(item.at).getTime())) throw new Error("bad date");
+    } catch (err) {
+      console.error(JSON.stringify({ event: "textback.bad-entry", key, err: String(err) }));
+      await deps.store.setFlag(key, undefined);
+      continue;
+    }
     if (!business) { await deps.store.setFlag(key, undefined); continue; }
     if (now.getTime() - new Date(item.at).getTime() > DAY) { await deps.store.setFlag(key, undefined); continue; }
     if (!textingAllowed(now, business.timeZone, caller)) continue;

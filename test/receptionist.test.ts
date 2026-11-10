@@ -436,12 +436,41 @@ describe("legal fixes", () => {
   });
 
   it("opt-outs survive a restart", async () => {
-    const { withPersistentOptOuts } = await import("../src/store.js");
     const { mkdtempSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
-    const file = `${mkdtempSync(`${tmpdir()}/oo-`)}/optout.json`;
-    await withPersistentOptOuts(memoryStore(), file).setOptOut(CALLER, true);
-    expect(await withPersistentOptOuts(memoryStore(), file).isOptedOut(CALLER)).toBe(true);
+    const file = `${mkdtempSync(`${tmpdir()}/oo-`)}/state.json`;
+    await memoryStore(file).setOptOut(CALLER, true);
+    expect(await memoryStore(file).isOptedOut(CALLER)).toBe(true);
+  });
+
+  it("an unwritable STATE_FILE is logged, not fatal, and shows in the store", async () => {
+    const st = memoryStore("/nonexistent-dir/definitely/state.json");
+    await st.recordEvent("wright-ai", "text", CALLER, TUESDAY_10AM);
+    await st.setFlag("a", "b");
+    expect(await st.getFlag("a")).toBe("b");
+    expect(st.lastPersistError).toContain("ENOENT");
+    const { assertWritable } = await import("../src/store.js");
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const blocker = `${mkdtempSync(`${tmpdir()}/aw-`)}/afile`;
+    writeFileSync(blocker, "x");
+    expect(() => assertWritable(`${blocker}/sub/state.json`)).toThrow();
+  });
+
+  it("a corrupt deferred entry is dropped without blocking the others", async () => {
+    const { deps, store } = setup();
+    await store.setFlag("deferred-textback:wright-ai|+14805550100", "{not json");
+    await expect(flushDeferredTextBacks({ store, notify: deps.notify, now: () => TUESDAY_10AM }, deps.businesses)).resolves.toBe(0);
+    expect(await store.listFlags("deferred-textback:")).toEqual([]);
+  });
+
+  it("sweep removes old calls and counts outcomes", async () => {
+    const st = memoryStore();
+    await st.saveCall({ callId: "old", businessId: "b", caller: CALLER, startedAt: "2026-01-01T00:00:00Z", outcome: "booked" });
+    await st.saveCall({ callId: "new", businessId: "b", caller: CALLER, startedAt: "2026-11-09T00:00:00Z", outcome: "message" });
+    expect((await st.outcomesSince("b", new Date("2026-11-01")))["message"]).toBe(1);
+    expect(await st.sweep(new Date("2026-06-01"))).toBe(1);
+    expect(await st.getCall("old")).toBeUndefined();
   });
 
   it("quiet hours hold in Eastern and Pacific time too", async () => {
@@ -574,8 +603,10 @@ describe("fix round 1", () => {
     expect((await app.request("/admin/status.json")).status).toBe(401);
     const res = await app.request("/admin/status.json", { headers: { Authorization: "Bearer s3cret" } });
     const j = (await res.json()) as any;
-    expect(j.version).toBe("abc123");
-    expect(j.calCom).toBe("reachable");
+    expect(j.basic.find((f: any) => f.name === "Version").detail).toBe("abc123");
+    expect(j.status).toBeDefined();
+    expect(j.important[0].last_checked).toBeDefined();
+    expect(j.key.find((f: any) => f.name === "Watchdog").status).toBe("unknown");
     expect(j.latestUpdate).toContain("Latest Update");
   });
 

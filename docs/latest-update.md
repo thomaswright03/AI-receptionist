@@ -6,3 +6,6 @@
 - The owner gets a summary email per call; tool errors text the owner; `/health` returns 503 when live config is missing.
 - Missed calls outside texting hours are queued and sent when the window opens (within 24 h).
 - Booking omits an unknown caller number and keys on the call id; over-cap calls without an owner phone get message-taking only; removed the unused `check_availability` and `status-update` and the unused `db/schema.sql`.
+
+## Fix round 2 (2026-11-10)
+- Status JSON in tiered format with real Cal.com slot check and outcome counts; disk-write failures no longer fail calls; fly.toml/render.yaml/Dockerfile persist `/data`; weekly owner summary; 90-day sweep; cost and duration stored per call; corrupt queued text-back dropped; one owner SMS for a queued text-back.

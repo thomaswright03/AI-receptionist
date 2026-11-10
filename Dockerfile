@@ -14,5 +14,6 @@ COPY --from=build /app/dist ./dist
 COPY docs/legal ./docs/legal
 COPY docs/latest-update.md ./docs/latest-update.md
 COPY package.json ./
+RUN mkdir -p /data
 EXPOSE 8080
 CMD ["node", "dist/server.js"]

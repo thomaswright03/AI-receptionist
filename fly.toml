@@ -13,3 +13,10 @@ primary_region = "phx"
   path = "/health"
   interval = "30s"
   timeout = "5s"
+
+# State (messages, PAUSE flag, booking keys, opt-outs) lives here. Create once: fly volumes create receptionist_data --region phx --size 1
+# Daily snapshots are on by default; keep 14 days.
+[mounts]
+  source = "receptionist_data"
+  destination = "/data"
+  snapshot_retention = 14

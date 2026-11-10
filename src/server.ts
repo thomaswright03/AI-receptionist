@@ -3,7 +3,8 @@ import { createApp } from "./app.js";
 import { loadBusinesses } from "./config/businesses.js";
 import { loadEnv } from "./config/env.js";
 import { notifier } from "./notify.js";
-import { memoryStore, withPersistentOptOuts } from "./store.js";
+import { assertWritable, memoryStore, RETENTION_DAYS } from "./store.js";
+import { sendWeeklySummaries } from "./summary.js";
 import { flushDeferredTextBacks } from "./textBack.js";
 import { Watchdog, watchdogTick } from "./safety/watchdog.js";
 
@@ -20,7 +21,15 @@ if (env.DRY_RUN === "false") {
     process.exit(1);
   }
 }
-const store = env.STATE_FILE ? memoryStore(env.STATE_FILE) : env.OPTOUT_FILE ? withPersistentOptOuts(memoryStore(), env.OPTOUT_FILE) : memoryStore();
+if (env.STATE_FILE) {
+  try {
+    assertWritable(env.STATE_FILE);
+  } catch (err) {
+    console.error(JSON.stringify({ event: "startup.refused", why: "STATE_FILE directory is not writable (is the disk mounted?)", err: String(err) }));
+    if (env.DRY_RUN === "false") process.exit(1);
+  }
+}
+const store = memoryStore(env.STATE_FILE);
 const app = createApp({ env, businesses, store, notify, watchdog });
 
 const watchUrls = env.WATCHDOG_URLS.split(",").map((u) => u.trim()).filter(Boolean);
@@ -32,6 +41,15 @@ if (watchUrls.length) {
 }
 
 setInterval(() => {
+  sendWeeklySummaries({ store, notify }, businesses).catch((err) => console.error(JSON.stringify({ event: "weekly.error", err: String(err) })));
+}, 3_600_000);
+
+setInterval(() => {
+  store.sweep(new Date(Date.now() - RETENTION_DAYS * 86_400_000)).catch((err) => console.error(JSON.stringify({ event: "sweep.error", err: String(err) })));
+}, 6 * 3_600_000);
+
+setInterval(() => {
+  store.setFlag("flush-last-run", new Date().toISOString()).catch(() => undefined);
   flushDeferredTextBacks({ store, notify }, businesses).catch((err) => console.error(JSON.stringify({ event: "textback.flush.error", err: String(err) })));
 }, 60_000);
 

@@ -39,6 +39,8 @@ interface VapiMessage {
   phoneNumber?: { number?: string };
   toolCallList?: { id: string; function?: { name?: string; arguments?: unknown } }[];
   endedReason?: string;
+  cost?: number;
+  durationSeconds?: number;
   analysis?: { summary?: string };
   artifact?: { transcript?: string; recordingUrl?: string; messages?: { role?: string }[] };
   status?: string;
@@ -263,6 +265,8 @@ async function endOfCall(deps: Deps, m: VapiMessage): Promise<void> {
     summary: m.analysis?.summary,
     transcript: m.artifact?.transcript,
     recordingUrl: m.artifact?.recordingUrl,
+    costUsd: typeof m.cost === "number" ? m.cost : undefined,
+    durationSeconds: typeof m.durationSeconds === "number" ? m.durationSeconds : undefined,
   });
   // The owner can always see what happened: one short email per call.
   const lines = [

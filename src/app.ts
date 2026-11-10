@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { validTwilioSignature } from "./twilio/signature.js";
 import * as twilio from "./twilio/routes.js";
 import { agentPaused } from "./safety/killswitch.js";
+import { openTimes } from "./tools/calcom.js";
 import { handleVapi, type Deps } from "./vapi/handler.js";
 
 function sameSecret(a: string, b: string | undefined): boolean {
@@ -15,6 +16,7 @@ function sameSecret(a: string, b: string | undefined): boolean {
 
 export function createApp(deps: Deps): Hono {
   const app = new Hono();
+  const isAdmin = (header: string | undefined) => Boolean(deps.env.ADMIN_SECRET) && sameSecret(header?.replace(/^Bearer /, "") ?? "", deps.env.ADMIN_SECRET);
 
   // Config the service can't safely run live without. Only enforced when DRY_RUN=false.
   const missingConfig = () => {
@@ -33,38 +35,53 @@ export function createApp(deps: Deps): Hono {
     return c.json({ ok: missing.length === 0, dryRun, missing, version: deps.env.APP_VERSION }, missing.length ? 503 : 200);
   });
 
-  // Owner/operator status: real checks, behind ADMIN_SECRET.
+  // Owner/operator status in the standard tiered shape: real checks, behind ADMIN_SECRET.
   app.get("/admin/status.json", async (c) => {
-    const auth = c.req.header("authorization")?.replace(/^Bearer /, "") ?? "";
-    if (!deps.env.ADMIN_SECRET || !sameSecret(auth, deps.env.ADMIN_SECRET)) return c.json({ error: "unauthorized" }, 401);
-    let cal: string;
-    try {
-      await (deps.fetch ?? fetch)("https://api.cal.com/v2/slots", { signal: AbortSignal.timeout(3000) });
-      cal = "reachable";
-    } catch (err) {
-      cal = `unreachable: ${String(err)}`;
+    if (!isAdmin(c.req.header("authorization"))) return c.json({ error: "unauthorized" }, 401);
+    const now = deps.now?.() ?? new Date();
+    const iso = now.toISOString();
+    type St = "ok" | "warning" | "down" | "unknown";
+    const fn = (name: string, status: St, detail: string, lastSuccess: string | null = null, nextExpected: string | null = null) =>
+      ({ name, status, detail, last_checked: iso, last_success: lastSuccess, next_expected_run: nextExpected });
+
+    // Cal.com: the real event's slots, not just any HTTP reply.
+    const calBiz = deps.businesses.find((b) => b.cal);
+    let cal = fn("Cal.com availability", "unknown", "no Cal.com event configured (CAL_LINK_*)");
+    if (calBiz?.cal) {
+      const slots = await openTimes(calBiz.cal, now, new Date(now.getTime() + 7 * 86_400_000), deps.env.CAL_API_KEY, deps.fetch);
+      cal = slots === null ? fn("Cal.com availability", "down", "slots request failed") : fn("Cal.com availability", slots.length ? "ok" : "warning", `${slots.length} open slots in the next 7 days`, slots.length ? iso : null);
     }
+    const lastFlush = (await deps.store.getFlag("flush-last-run")) ?? null;
+    const flushAge = lastFlush ? now.getTime() - new Date(lastFlush).getTime() : Infinity;
+    const flush = fn("Deferred text-back job", lastFlush ? (flushAge < 180_000 ? "ok" : "down") : "unknown", lastFlush ? `last run ${lastFlush}` : "has not run yet (or not started by server)", lastFlush, lastFlush ? new Date(new Date(lastFlush).getTime() + 60_000).toISOString() : null);
+    const wd = deps.watchdog && deps.env.WATCHDOG_URLS ? fn("Watchdog", deps.watchdog.healthy ? "ok" : "down", deps.watchdog.lastError ?? "healthy", deps.watchdog.healthy ? iso : null) : fn("Watchdog", "unknown", "off (WATCHDOG_URLS is empty)");
+    const disk = deps.env.STATE_FILE ? fn("State storage", deps.store.lastPersistError ? "down" : "ok", deps.store.lastPersistError ?? `writing to ${deps.env.STATE_FILE}`, deps.store.lastPersistError ? null : iso) : fn("State storage", "warning", "STATE_FILE not set: state is lost on restart");
+    const cfgMissing = missingConfig();
+    const config = fn("Live configuration", cfgMissing.length ? (deps.env.DRY_RUN === "false" ? "down" : "warning") : "ok", cfgMissing.length ? `missing: ${cfgMissing.join(", ")}` : "all present", cfgMissing.length ? null : iso);
+
     const businesses = await Promise.all(
-      deps.businesses.map(async (b) => ({
-        id: b.id,
-        paused: await agentPaused(deps, b).catch((err: unknown) => ({ paused: true, why: String(err) })),
-        lastCallAt: (await deps.store.getFlag(`last-call-at:${b.id}`)) ?? null,
-        queuedTextBacks: (await deps.store.listFlags(`deferred-textback:${b.id}|`)).length,
-      })),
+      deps.businesses.map(async (b) => {
+        const paused = await agentPaused(deps, b).catch((err: unknown) => ({ paused: true, why: String(err) }));
+        return {
+          id: b.id,
+          paused,
+          lastCallAt: (await deps.store.getFlag(`last-call-at:${b.id}`)) ?? null,
+          queuedTextBacks: (await deps.store.listFlags(`deferred-textback:${b.id}|`)).length,
+          outcomesToday: await deps.store.outcomesSince(b.id, new Date(now.getTime() - 86_400_000)),
+          outcomes7Days: await deps.store.outcomesSince(b.id, new Date(now.getTime() - 7 * 86_400_000)),
+        };
+      }),
     );
+    const important = [disk, config, cal];
+    const key = [flush, wd];
+    const basic = [
+      fn("Version", "ok", deps.env.APP_VERSION ?? "unknown", iso),
+      fn("Mode", "ok", `agent=${deps.env.AGENT_MODE}, dryRun=${deps.env.DRY_RUN !== "false"}, killSwitch=${deps.env.KILL_SWITCH}`, iso),
+    ];
+    const rank: Record<St, number> = { ok: 0, unknown: 1, warning: 2, down: 3 };
+    const overall = [...important, ...key].reduce<St>((w, f) => (rank[f.status] > rank[w] ? f.status : w), "ok");
     const latestUpdate = await readFile(new URL("../docs/latest-update.md", import.meta.url), "utf8").catch(() => null);
-    return c.json({
-      version: deps.env.APP_VERSION,
-      dryRun: deps.env.DRY_RUN !== "false",
-      agentMode: deps.env.AGENT_MODE,
-      killSwitch: deps.env.KILL_SWITCH,
-      watchdog: deps.watchdog ? { healthy: deps.watchdog.healthy, lastError: deps.watchdog.lastError ?? null } : "off",
-      config: { twilio: Boolean(deps.env.TWILIO_AUTH_TOKEN), resend: Boolean(deps.env.RESEND_API_KEY), calApiKey: Boolean(deps.env.CAL_API_KEY), stateFile: Boolean(deps.env.STATE_FILE) },
-      missingConfig: missingConfig(),
-      calCom: cal,
-      businesses,
-      latestUpdate,
-    });
+    return c.json({ status: overall, last_checked: iso, important, key, basic, businesses, latestUpdate });
   });
 
   // Public legal documents (linked from the text-back and the 10DLC registration).
@@ -91,8 +108,7 @@ export function createApp(deps: Deps): Hono {
   // Operator tools for access, correction and deletion requests, by phone number.
   for (const action of ["export", "delete"] as const) {
     app.post(`/admin/${action}`, async (c) => {
-      const auth = c.req.header("authorization")?.replace(/^Bearer /, "") ?? "";
-      if (!deps.env.ADMIN_SECRET || !sameSecret(auth, deps.env.ADMIN_SECRET)) return c.json({ error: "unauthorized" }, 401);
+      if (!isAdmin(c.req.header("authorization"))) return c.json({ error: "unauthorized" }, 401);
       const body = (await c.req.json().catch(() => null)) as { phone?: string } | null;
       if (!body?.phone || !/^\+\d{8,15}$/.test(body.phone)) return c.json({ error: "phone must be E.164, e.g. +14805551234" }, 400);
       if (action === "export") return c.json(await deps.store.exportNumber(body.phone));

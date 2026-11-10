@@ -28,8 +28,7 @@ Still open: retention sweep, Postgres store, deploy, Vapi/Twilio settings and li
 - QA person's name.
 
 ## Week 1 to-do (with accounts)
-- Postgres store implementing `Store` against `db/schema.sql`; switches and
-  booking keys move there (in memory they reset on deploy).
+- Optional: move the JSON state to SQLite/Turso if volume grows (state is already persisted in STATE_FILE).
 - Verify against live APIs: Vapi assistant fields and model id, the
   `<Redirect>` hand-off to Vapi's Twilio webhook, `destination` reply on
   assistant-request, end-of-call `endedReason` values, Twilio's voice-URL
@@ -49,3 +48,7 @@ Still open: retention sweep, Postgres store, deploy, Vapi/Twilio settings and li
 - Merged the scaffold branch into main; added docs/legal/* (privacy, terms, law, contracts, vendors, messaging, claims, data inventory, breach plan); `/privacy` and `/terms` routes.
 - Code: wider STOP detection, emergency/advice/promise prompt rules, disclosure version stored per call, text-back says automated + privacy link, "288 contracts / $86k" FAQ claim removed. 41 tests pass.
 - Still open: Postgres store + 90-day sweep + delete-by-number command, Latest Update admin area, 10DLC, vendor accounts/settings/licences, live QA of legal prompts, transfer-leg recording notice, Mountain High agreement, legal entity facts (docs use "Wright AI Solutions, Tempe AZ" and privacy@/legal@wright-ai-solutions.com, unconfirmed).
+
+## Excellence fix round 2 (2026-11-10)
+Done: fly.toml `[mounts]`, Dockerfile /data, render.yaml; persist failures logged not fatal, startup writability check; tiered /admin/status.json (real Cal slots, watchdog unknown when off, flush heartbeat, outcome counts); weekly summary email; 90-day sweep; cost/duration stored; corrupt deferred entry dropped; single owner SMS for queued text-back; OPTOUT_FILE removed; admin auth helper; backup/rollback documented in README.
+Not done (needs paid host / accounts): actual deploy and live probes, restore drill, external uptime monitor (create after deploy), lint tool, transcripts out of the hot file.

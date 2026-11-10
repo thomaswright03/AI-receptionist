@@ -1,0 +1,18 @@
+# Render alternative to fly.toml. The persistent disk holds STATE_FILE; without it state is lost on every deploy.
+services:
+  - type: web
+    name: ai-receptionist
+    runtime: docker
+    plan: starter        # disks need a paid plan
+    healthCheckPath: /health
+    disk:
+      name: receptionist-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: STATE_FILE
+        value: /data/state.json
+      - key: DRY_RUN
+        value: "true"
+      - key: AGENT_MODE
+        value: stub
