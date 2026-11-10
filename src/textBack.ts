@@ -15,6 +15,7 @@ export async function missedCallTextBack(
   business: Business,
   caller: string,
   reason: string,
+  callId?: string,
 ): Promise<TextBackResult> {
   const now = deps.now ?? new Date();
   const from = business.inboundNumbers[0];
@@ -30,16 +31,28 @@ export async function missedCallTextBack(
     if (!from) return { sent: false, why: "business has no number" };
     if (!/^\+1\d{10}$/.test(caller)) return { sent: false, why: "caller number is hidden or not a US mobile format" };
     if (await deps.store.isOptedOut(caller)) return { sent: false, why: "caller opted out" };
-    if (!textingAllowed(now, business.timeZone)) return { sent: false, why: "outside 8am-9pm" };
+    if (!textingAllowed(now, business.timeZone, caller)) return { sent: false, why: "outside 8am-9pm for the recipient" };
     const last = await deps.store.lastTextTo(business.id, caller);
     if (last && now.getTime() - last.getTime() < DAY) return { sent: false, why: "already texted in the last 24 hours" };
     const today = await deps.store.countSince(business.id, "text", new Date(now.getTime() - DAY));
     if (today >= business.caps.textsPerDay) return { sent: false, why: "daily text cap reached" };
     const sent = await deps.notify.sms(caller, from, business.textBack);
     if (!sent.ok) return { sent: false, why: `send failed: ${sent.error}` };
-    await deps.store.recordEvent(business.id, "text", caller, now);
+    await deps.store.recordEvent(business.id, "text", caller, now, "reply_to_inbound_call", callId);
     return { sent: true };
   }
+}
+
+/** The one door for texts to callers: never to an opted-out number. */
+export async function sendCallerSms(
+  deps: { store: Store; notify: Notifier },
+  to: string,
+  from: string,
+  body: string,
+): Promise<{ sent: boolean; why?: string }> {
+  if (await deps.store.isOptedOut(to)) return { sent: false, why: "caller opted out" };
+  const r = await deps.notify.sms(to, from, body);
+  return r.ok ? { sent: true } : { sent: false, why: r.error };
 }
 
 const STOP_WORDS = /^\s*(stop|stopall|unsubscribe|cancel|end|quit|revoke|optout|opt[- ]out)\s*$/i;

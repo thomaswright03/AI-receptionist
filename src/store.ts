@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync } from "node:fs";
+
 // What the service remembers between requests. In memory for now so the
 // whole call path can be built and tested; the Postgres version (week 1)
 // implements the same interface, so nothing else changes when it lands.
@@ -25,7 +27,10 @@ export interface Store {
   getCall(callId: string): Promise<CallRecord | undefined>;
   /** Counts events of a kind for a business since a time, for the daily caps. */
   countSince(businessId: string, kind: "call" | "text", since: Date): Promise<number>;
-  recordEvent(businessId: string, kind: "call" | "text", to: string, at: Date): Promise<void>;
+  recordEvent(businessId: string, kind: "call" | "text", to: string, at: Date, basis?: string, callId?: string): Promise<void>;
+  /** Everything held about a number, and its removal (delete-by-number). */
+  exportNumber(phone: string): Promise<unknown>;
+  deleteNumber(phone: string): Promise<number>;
   lastTextTo(businessId: string, to: string): Promise<Date | undefined>;
   isOptedOut(phone: string): Promise<boolean>;
   setOptOut(phone: string, optedOut: boolean): Promise<void>;
@@ -36,7 +41,7 @@ export interface Store {
 
 export function memoryStore(): Store {
   const calls = new Map<string, CallRecord>();
-  const events: { businessId: string; kind: "call" | "text"; to: string; at: Date }[] = [];
+  const events: { businessId: string; kind: "call" | "text"; to: string; at: Date; basis?: string; callId?: string }[] = [];
   const optedOut = new Set<string>();
   const flags = new Map<string, string>();
   return {
@@ -49,8 +54,21 @@ export function memoryStore(): Store {
     async countSince(businessId, kind, since) {
       return events.filter((e) => e.businessId === businessId && e.kind === kind && e.at >= since).length;
     },
-    async recordEvent(businessId, kind, to, at) {
-      events.push({ businessId, kind, to, at });
+    async recordEvent(businessId, kind, to, at, basis, callId) {
+      events.push({ businessId, kind, to, at, basis, callId });
+    },
+    async exportNumber(phone) {
+      return {
+        calls: [...calls.values()].filter((c) => c.caller === phone),
+        events: events.filter((e) => e.to === phone),
+        optedOut: optedOut.has(phone),
+      };
+    },
+    async deleteNumber(phone) {
+      let n = 0;
+      for (const [id, c] of calls) if (c.caller === phone) { calls.delete(id); n++; }
+      for (let i = events.length - 1; i >= 0; i--) if (events[i]!.to === phone) { events.splice(i, 1); n++; }
+      return n; // opt-out status is kept on purpose so the number is still never texted
     },
     async lastTextTo(businessId, to) {
       const sent = events.filter((e) => e.businessId === businessId && e.kind === "text" && e.to === to);
@@ -69,6 +87,29 @@ export function memoryStore(): Store {
     async setFlag(key, value) {
       if (value === undefined) flags.delete(key);
       else flags.set(key, value);
+    },
+  };
+}
+
+/** Wraps a store so opt-outs survive restarts: they are loaded from, and written to, a JSON file. */
+export function withPersistentOptOuts(inner: Store, file: string): Store {
+  const loaded = new Set<string>();
+  try {
+    for (const p of JSON.parse(readFileSync(file, "utf8")) as string[]) loaded.add(p);
+  } catch {
+    /* no file yet */
+  }
+  const save = () => writeFileSync(file, JSON.stringify([...loaded]));
+  return {
+    ...inner,
+    async isOptedOut(phone) {
+      return loaded.has(phone) || inner.isOptedOut(phone);
+    },
+    async setOptOut(phone, value) {
+      if (value) loaded.add(phone);
+      else loaded.delete(phone);
+      save();
+      await inner.setOptOut(phone, value);
     },
   };
 }

@@ -249,7 +249,7 @@ describe("text-back", () => {
   it("respects quiet hours and opt-outs", async () => {
     const { deps, store } = setup();
     const business = deps.businesses[0]!;
-    expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_11PM }, business, CALLER, "x")).toEqual({ sent: false, why: "outside 8am-9pm" });
+    expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_11PM }, business, CALLER, "x")).toEqual({ sent: false, why: "outside 8am-9pm for the recipient" });
     await store.setOptOut(CALLER, true);
     expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_10AM }, business, CALLER, "x")).toEqual({ sent: false, why: "caller opted out" });
   });
@@ -416,5 +416,62 @@ describe("vapi auth", () => {
     const { deps } = setup({ env: { VAPI_SECRET: "s3cret" } });
     const res = await createApp(deps).request("/vapi", { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("legal fixes", () => {
+  it("/vapi refuses when live and VAPI_SECRET is unset", async () => {
+    const { deps } = setup({ env: { DRY_RUN: "false" } });
+    const res = await createApp(deps).request("/vapi", { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
+    expect(res.status).toBe(503);
+  });
+
+  it("an opted-out caller gets no booking text", async () => {
+    const { sendCallerSms } = await import("../src/textBack.js");
+    const { deps, sent } = setup();
+    await deps.store.setOptOut(CALLER, true);
+    const r = await sendCallerSms(deps, CALLER, NUMBER, "hi");
+    expect(r.sent).toBe(false);
+    expect(sent.filter((s) => s.to === CALLER)).toHaveLength(0);
+  });
+
+  it("opt-outs survive a restart", async () => {
+    const { withPersistentOptOuts } = await import("../src/store.js");
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const file = `${mkdtempSync(`${tmpdir()}/oo-`)}/optout.json`;
+    await withPersistentOptOuts(memoryStore(), file).setOptOut(CALLER, true);
+    expect(await withPersistentOptOuts(memoryStore(), file).isOptedOut(CALLER)).toBe(true);
+  });
+
+  it("quiet hours hold in Eastern and Pacific time too", async () => {
+    const { textingAllowed } = await import("../src/safety/hours.js");
+    expect(textingAllowed(new Date("2026-11-10T20:00:00Z"), "America/Phoenix")).toBe(true); // 1pm PT/AZ, 3pm ET
+    expect(textingAllowed(new Date("2026-11-10T15:30:00Z"), "America/Phoenix")).toBe(false); // 7:30am PT
+    expect(textingAllowed(new Date("2026-11-11T02:30:00Z"), "America/Phoenix")).toBe(false); // 9:30pm ET
+    expect(textingAllowed(new Date("2026-11-10T20:00:00Z"), "America/Phoenix", "+18085551234")).toBe(false);
+  });
+
+  it("stub prompts carry the emergency and no-advice rules", async () => {
+    const { buildStubAssistant } = await import("../src/vapi/assistant.js");
+    const { deps } = setup();
+    for (const canTransfer of [true, false]) {
+      const a = buildStubAssistant(deps.env, deps.businesses[0]!, { canTransfer }) as any;
+      const p = a.model.messages[0].content as string;
+      expect(p).toContain("911");
+      expect(p).toContain("no medical, legal, tax or financial advice");
+    }
+  });
+});
+
+describe("admin delete", () => {
+  it("needs the admin secret, then deletes by number", async () => {
+    const { deps, store } = setup({ env: { ADMIN_SECRET: "adm" } });
+    await store.saveCall({ callId: "c9", businessId: "wright-ai", caller: CALLER, startedAt: "x", outcome: "message" });
+    const app = createApp(deps);
+    const post = (h: Record<string, string>) => app.request("/admin/delete", { method: "POST", body: JSON.stringify({ phone: CALLER }), headers: { "Content-Type": "application/json", ...h } });
+    expect((await post({})).status).toBe(401);
+    expect((await post({ Authorization: "Bearer adm" })).status).toBe(200);
+    expect(await store.getCall("c9")).toBeUndefined();
   });
 });

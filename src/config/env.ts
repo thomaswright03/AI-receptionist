@@ -16,6 +16,10 @@ const schema = z.object({
   VAPI_TWILIO_INBOUND_URL: z.string().url().default("https://api.vapi.ai/twilio/inbound_call"),
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
+  /** File that keeps opt-outs across restarts (put it on a Fly volume). Empty = memory only. */
+  OPTOUT_FILE: z.string().optional(),
+  /** Bearer token for /admin/export and /admin/delete (by phone number). Routes are off when unset. */
+  ADMIN_SECRET: z.string().optional(),
   CAL_API_KEY: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().default("AI Receptionist <receptionist@wright-ai-solutions.com>"),

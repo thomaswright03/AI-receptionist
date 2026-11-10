@@ -25,14 +25,30 @@ export function createApp(deps: Deps): Hono {
     });
   }
 
-  // Vapi server messages. When VAPI_SECRET is set, every request must carry it.
+  // Vapi server messages. Every request must carry VAPI_SECRET; with DRY_RUN=false and no secret set, all are refused.
   app.post("/vapi", async (c) => {
+    if (!deps.env.VAPI_SECRET && deps.env.DRY_RUN === "false") {
+      // Fail closed: never accept unauthenticated tool calls once real texts and bookings can go out.
+      return c.json({ error: "VAPI_SECRET not configured" }, 503);
+    }
     if (deps.env.VAPI_SECRET && !sameSecret(deps.env.VAPI_SECRET, c.req.header("x-vapi-secret"))) {
       return c.json({ error: "unauthorized" }, 401);
     }
     const body = await c.req.json().catch(() => null);
     return c.json(await handleVapi(deps, body));
   });
+
+  // Operator tools for access, correction and deletion requests, by phone number.
+  for (const action of ["export", "delete"] as const) {
+    app.post(`/admin/${action}`, async (c) => {
+      const auth = c.req.header("authorization")?.replace(/^Bearer /, "") ?? "";
+      if (!deps.env.ADMIN_SECRET || !sameSecret(auth, deps.env.ADMIN_SECRET)) return c.json({ error: "unauthorized" }, 401);
+      const body = (await c.req.json().catch(() => null)) as { phone?: string } | null;
+      if (!body?.phone || !/^\+\d{8,15}$/.test(body.phone)) return c.json({ error: "phone must be E.164, e.g. +14805551234" }, 400);
+      if (action === "export") return c.json(await deps.store.exportNumber(body.phone));
+      return c.json({ deleted: await deps.store.deleteNumber(body.phone), note: "Also delete in Vapi, Cal.com and Twilio logs; see docs/legal/data-inventory.md" });
+    });
+  }
 
   // Twilio webhooks: form-encoded, signed with the account's auth token.
   const twilioRoute = (path: string, handler: (p: twilio.Params) => Promise<string | void>) =>

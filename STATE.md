@@ -13,6 +13,10 @@ Plan: https://claude.ai/artifact/91wucVfWdBXVbStkszR8Ta (final 2026-11-10; next 
   in-memory store (`src/store.ts`).
 - Nothing has run against real Vapi, Twilio or Cal.com yet.
 
+## Legal fix round 2 (2026-11-10)
+Done: /vapi fails closed; one opt-out gate for all caller SMS; opt-outs persist (OPTOUT_FILE, needs a Fly volume at /data); strict quiet hours; basis recorded; stub safety rules; /admin/export|delete; docs aligned; README Latest Update. 47 tests pass.
+Still open: retention sweep, Postgres store, deploy, Vapi/Twilio settings and live probes (Thomas-gated accounts), USPTO check, ElevenLabs licence record.
+
 ## Needed from Thomas (today)
 - Phone-only Cal.com event (15 min, no round robin, required "what do you need") → `CAL_LINK_WRIGHT_AI`.
 - Vapi, Twilio, ElevenLabs accounts; Twilio number; A2P 10DLC filed.

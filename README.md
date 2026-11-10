@@ -83,3 +83,11 @@ QA call script: `docs/qa-cases.md`. Status and what's next: `STATE.md`.
 
 ## Legal
 Privacy notice: `docs/legal/privacy.md` (served at `/privacy`); terms: `docs/legal/terms.md` (`/terms`). Also in `docs/legal/`: applicable law, contracts register, vendors, messaging, claims, data inventory, breach plan.
+
+## Latest Update (2026-11-10)
+- No frontend changes in this round (there is no web UI).
+- `/vapi` now refuses requests (503) when `DRY_RUN=false` and `VAPI_SECRET` is unset.
+- Every text to a caller goes through one opt-out check (booking confirmations included); opt-outs persist in `OPTOUT_FILE`; texts are sent only inside 8am-9pm across US time zones; text-backs record their basis.
+- Week-1 stub prompts now send emergencies to 911 and give no advice or promises.
+- New operator endpoints `POST /admin/export` and `/admin/delete` (by phone number, `ADMIN_SECRET`).
+- Legal documents corrected to match the code (Deepgram, Resend, planned services, training wording, terms licences/indemnity).

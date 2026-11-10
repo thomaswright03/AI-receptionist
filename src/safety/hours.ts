@@ -31,7 +31,16 @@ export function withinHours(hours: WeeklyHours, at: Date, timeZone: string): boo
   return hours.days.includes(day) && minutes >= toMinutes(hours.start) && minutes < toMinutes(hours.end);
 }
 
-/** Texts only go out 8am to 9pm local time. */
-export function textingAllowed(at: Date, timeZone: string): boolean {
-  return withinHours({ days: [0, 1, 2, 3, 4, 5, 6], start: "08:00", end: "21:00" }, at, timeZone);
+const EVERY_DAY = [0, 1, 2, 3, 4, 5, 6];
+const QUIET = { days: EVERY_DAY, start: "08:00", end: "21:00" };
+
+/**
+ * Texts go out only when it is 8am to 9pm for the recipient. We don't look up the
+ * recipient's zone; we require the window to hold in the business zone and in both
+ * Eastern and Pacific time, which covers every continental US zone. Hawaii (808)
+ * and Alaska (907) numbers are not texted.
+ */
+export function textingAllowed(at: Date, timeZone: string, recipient?: string): boolean {
+  if (recipient && /^\+1(808|907)/.test(recipient)) return false;
+  return [timeZone, "America/New_York", "America/Los_Angeles"].every((tz) => withinHours(QUIET, at, tz));
 }

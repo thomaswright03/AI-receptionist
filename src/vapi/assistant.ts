@@ -207,9 +207,11 @@ export function buildStubAssistant(
     openTimes: null,
     canTransfer: ctx.canTransfer,
   });
-  const prompt = ctx.canTransfer
+  const safety =
+    " If the caller describes an emergency (danger to life, injury, fire, crime in progress, self-harm), say 'Please hang up and call 911 now' first, then call take_message with urgent: true. Give no medical, legal, tax or financial advice, and make no promises about prices, timing or outcomes.";
+  const prompt = (ctx.canTransfer
     ? "You are a receptionist in test mode. After the greeting, say 'Let me connect you with Thomas' and transfer the call right away. Do nothing else."
-    : "You are a receptionist in test mode. Thomas is not available. Ask for the caller's name and what they need, call take_message, say Thomas will call back, then end the call. Do nothing else.";
+    : ("You are a receptionist in test mode. Thomas is not available. Ask for the caller's name and what they need, call take_message, say Thomas will call back, then end the call. Do nothing else.")) + safety;
   const model = full.model as Record<string, unknown>;
   return { ...full, name: `${business.id}-stub`, model: { ...model, messages: [{ role: "system", content: prompt }] } };
 }

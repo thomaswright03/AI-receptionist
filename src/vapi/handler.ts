@@ -6,7 +6,7 @@ import type { Notifier } from "../notify.js";
 import { withinHours } from "../safety/hours.js";
 import type { Store } from "../store.js";
 import type { Watchdog } from "../safety/watchdog.js";
-import { missedCallTextBack } from "../textBack.js";
+import { missedCallTextBack, sendCallerSms } from "../textBack.js";
 import { DISCLOSURE_VERSION } from "./assistant.js";
 import { bookCall, openTimes } from "../tools/calcom.js";
 import { buildAssistant, buildStubAssistant, spokenTime } from "./assistant.js";
@@ -164,7 +164,7 @@ async function runTool(
         await deps.store.saveCall({ ...(await baseCall(deps, callId, business, caller)), outcome: "booked" });
       }
       // Caller gets a text confirmation; the owner gets email (texts are kept for what needs action now).
-      if (from) await deps.notify.sms(caller, from, `You're booked with ${business.name} for ${when}. A calendar invite is on its way to ${email.trim()}. Reply STOP to opt out.`);
+      if (from) await sendCallerSms(deps, caller, from, `You're booked with ${business.name} for ${when}. A calendar invite is on its way to ${email.trim()}. Reply STOP to opt out.`);
       await deps.notify.email(business.ownerEmail, `Phone booking: ${who}, ${when}`, `${who}\n${business_name ?? ""}\n${caller}\n${email}\n\nNeed: ${need}`);
       return { booked: true, say: `Booked for ${when}. Tell them an invite is going to their email and a text confirmation to their phone.` };
     }
@@ -228,7 +228,7 @@ async function endOfCall(deps: Deps, m: VapiMessage): Promise<void> {
   let outcome = existing.outcome;
   if (outcome === "unknown" && /forwarded|transfer/i.test(m.endedReason ?? "")) outcome = "transferred";
   if (needsTextBack(m.endedReason, userTurns, outcome)) {
-    await missedCallTextBack({ store: deps.store, notify: deps.notify, now: deps.now?.() }, business, caller, `call ended: ${m.endedReason}`);
+    await missedCallTextBack({ store: deps.store, notify: deps.notify, now: deps.now?.() }, business, caller, `call ended: ${m.endedReason}`, callId);
     outcome = "text-back";
   }
   await deps.store.saveCall({

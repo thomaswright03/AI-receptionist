@@ -1,6 +1,6 @@
 # Messaging classification (MSG1, MSG2, MSG3, MSG5)
-- Missed-call text-back is a transactional reply to the caller's own inbound call: one text, identifies sender, says it's automated, no promotion, includes STOP wording and the privacy link. Basis recorded as `reply_to_inbound_call` with the call id on the call record.
-- Booking confirmations are transactional.
+- Missed-call text-back is a transactional reply to the caller's own inbound call: one text, identifies sender, says it's automated, no promotion, includes STOP wording and the privacy link. Each text-back event is stored with basis `reply_to_inbound_call` and the call id.
+- Booking confirmations are transactional, sent in reply to the caller's live call, through the same opt-out check (`sendCallerSms`).
 - No marketing content may ever go through this service. 10DLC campaign: use case "customer care", sample message is the text-back text; registration needs the privacy URL (`/privacy`).
-- Sending: 8am to 9pm recipient-local time, US numbers only, max one per number per 24h, daily cap, kill switch.
-- Opt-out: keywords STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, REVOKE, OPTOUT, plus plain requests ("stop texting me"). Opted-out numbers get nothing further (tested).
+- Sending: 8am to 9pm for the recipient, checked conservatively: the window must hold in the business zone and in both Eastern and Pacific time (Hawaii and Alaska numbers are not texted), US numbers only, max one per number per 24h, daily cap, kill switch.
+- Opt-out: keywords STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, REVOKE, OPTOUT, plus plain requests ("stop texting me"). Opted-out numbers get nothing further, including booking confirmations (tested). Opt-outs are stored in a file on a persistent volume (`OPTOUT_FILE`) and survive restarts; set it in production.
