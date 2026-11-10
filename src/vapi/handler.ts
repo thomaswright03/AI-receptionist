@@ -7,6 +7,7 @@ import { withinHours } from "../safety/hours.js";
 import type { Store } from "../store.js";
 import type { Watchdog } from "../safety/watchdog.js";
 import { missedCallTextBack } from "../textBack.js";
+import { DISCLOSURE_VERSION } from "./assistant.js";
 import { bookCall, openTimes } from "../tools/calcom.js";
 import { buildAssistant, buildStubAssistant, spokenTime } from "./assistant.js";
 
@@ -82,7 +83,7 @@ async function assistantRequest(deps: Deps, m: VapiMessage): Promise<Record<stri
     return { destination: { type: "number", number: business.ownerPhone } };
   }
   if (m.call?.id) {
-    await deps.store.saveCall({ callId: m.call.id, businessId: business.id, caller: callerOf(m), startedAt: now.toISOString(), outcome: "unknown" });
+    await deps.store.saveCall({ callId: m.call.id, businessId: business.id, caller: callerOf(m), startedAt: now.toISOString(), outcome: "unknown", disclosureVersion: DISCLOSURE_VERSION, disclosedAt: now.toISOString() });
   }
   const canTransfer = Boolean(business.ownerPhone) && withinHours(business.transferHours, now, business.timeZone);
   if (deps.env.AGENT_MODE === "stub") return { assistant: buildStubAssistant(deps.env, business, { canTransfer }) };

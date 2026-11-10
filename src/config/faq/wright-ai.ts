@@ -21,7 +21,9 @@ export const wrightAiFaq: { q: string; a: string }[] = [
   },
   {
     q: "What results have you gotten?",
-    a: "One example: an AI text agent we built for a subscription service business follows up with new leads automatically. Leads it texted have signed 288 contracts since August 2026, about $86,000 in yearly revenue for that client.",
+    // The "288 contracts / $86,000" client figure was removed 2026-11-10: it needs that client's written
+    // permission and source records first (FTC 16 CFR 465). See docs/legal/claims.md.
+    a: "Thomas can walk you through real examples on a call, and results vary by business. I don't quote specific figures on the phone.",
   },
   {
     q: "What industries do you work with?",

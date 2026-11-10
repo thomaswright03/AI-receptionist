@@ -37,3 +37,8 @@ Plan: https://claude.ai/artifact/91wucVfWdBXVbStkszR8Ta (final 2026-11-10; next 
 - Recordings to R2, 90-day sweep honouring `keep_for_demo`; demo consent.
 - Dashboard; Cal.com reconciliation of unclear bookings (needs `CAL_API_KEY`).
 - Mountain High roll-off flow (reuse Mountain-High-Rolloff-Bot pricing, summary, GHL handoff).
+
+## Legal fix round 1 (2026-11-10)
+- Merged the scaffold branch into main; added docs/legal/* (privacy, terms, law, contracts, vendors, messaging, claims, data inventory, breach plan); `/privacy` and `/terms` routes.
+- Code: wider STOP detection, emergency/advice/promise prompt rules, disclosure version stored per call, text-back says automated + privacy link, "288 contracts / $86k" FAQ claim removed. 41 tests pass.
+- Still open: Postgres store + 90-day sweep + delete-by-number command, Latest Update admin area, 10DLC, vendor accounts/settings/licences, live QA of legal prompts, transfer-leg recording notice, Mountain High agreement, legal entity facts (docs use "Wright AI Solutions, Tempe AZ" and privacy@/legal@wright-ai-solutions.com, unconfirmed).

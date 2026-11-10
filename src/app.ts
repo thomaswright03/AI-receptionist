@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { Hono } from "hono";
 import { validTwilioSignature } from "./twilio/signature.js";
 import * as twilio from "./twilio/routes.js";
@@ -15,6 +16,14 @@ export function createApp(deps: Deps): Hono {
   const app = new Hono();
 
   app.get("/health", (c) => c.json({ ok: true, dryRun: deps.env.DRY_RUN !== "false", businesses: deps.businesses.map((b) => b.id) }));
+
+  // Public legal documents (linked from the text-back and the 10DLC registration).
+  for (const [path, file] of [["/privacy", "privacy.md"], ["/terms", "terms.md"]] as const) {
+    app.get(path, async (c) => {
+      const text = await readFile(new URL(`../docs/legal/${file}`, import.meta.url), "utf8").catch(() => null);
+      return text ? c.text(text, 200, { "Content-Type": "text/plain; charset=utf-8" }) : c.text("not found", 404);
+    });
+  }
 
   // Vapi server messages. When VAPI_SECRET is set, every request must carry it.
   app.post("/vapi", async (c) => {

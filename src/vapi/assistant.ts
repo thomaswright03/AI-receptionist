@@ -46,6 +46,9 @@ function transferRules(canTransfer: boolean): string[] {
       ];
 }
 
+/** Bump when the greeting wording changes; stored on every call as the consent record. */
+export const DISCLOSURE_VERSION = "2026-11-10-v1";
+
 export function greeting(business: Business): string {
   // Disclosure first: Vapi records from the first second.
   return `This is ${business.agentName}, an AI assistant for ${business.name}, and this call is recorded. How can I help?`;
@@ -81,7 +84,9 @@ export function systemPrompt(
     "",
     "ANSWERING QUESTIONS",
     "- Answer only from the approved answers below, in your own words. If a question is not covered, say the owner can answer that on a short call, and offer to book one.",
-    "- Never invent prices, timelines, clients, results, or features.",
+    "- Never invent prices, timelines, clients, results, or features. Never promise discounts, refunds, guarantees, warranties, or delivery dates; say the owner covers that on a call.",
+    "- You give no medical, legal, tax or financial advice. Politely decline and offer a call with the owner.",
+    "- If the caller describes an emergency (danger to life, injury, fire, crime in progress, self-harm), say: 'Please hang up and call 911 now.' Then call take_message with urgent: true so staff are alerted, and end the call.",
     "",
     "APPROVED ANSWERS",
     faq,

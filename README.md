@@ -80,3 +80,6 @@ Deploy: `fly deploy` (always-on machine in Phoenix, see `fly.toml`). Settings:
 `.env.example`.
 
 QA call script: `docs/qa-cases.md`. Status and what's next: `STATE.md`.
+
+## Legal
+Privacy notice: `docs/legal/privacy.md` (served at `/privacy`); terms: `docs/legal/terms.md` (`/terms`). Also in `docs/legal/`: applicable law, contracts register, vendors, messaging, claims, data inventory, breach plan.

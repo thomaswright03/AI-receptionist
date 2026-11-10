@@ -42,12 +42,14 @@ export async function missedCallTextBack(
   }
 }
 
-const STOP_WORDS = /^\s*(stop|stopall|unsubscribe|cancel|end|quit)\s*$/i;
+const STOP_WORDS = /^\s*(stop|stopall|unsubscribe|cancel|end|quit|revoke|optout|opt[- ]out)\s*$/i;
+// Plain requests such as "stop texting me" or "please don't text me again".
+const STOP_INTENT = /\b(stop|quit|cease|don'?t|do not|no more|remove me|take me off|leave me alone)\b.{0,30}\b(text|texts|texting|message|messages|messaging|contact|contacting|calling|list)\b|\bopt me out\b|\bunsubscribe\b/i;
 const START_WORDS = /^\s*(start|unstop|yes)\s*$/i;
 
 /** Handles STOP/START on inbound texts. Returns true when the message was an opt-out keyword. */
 export async function handleOptOut(store: Store, from: string, body: string): Promise<boolean> {
-  if (STOP_WORDS.test(body)) {
+  if (STOP_WORDS.test(body) || STOP_INTENT.test(body)) {
     await store.setOptOut(from, true);
     return true;
   }

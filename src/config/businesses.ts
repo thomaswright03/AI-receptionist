@@ -39,7 +39,7 @@ export function loadBusinesses(env: Env): Business[] {
       transferHours: { days: [1, 2, 3, 4, 5], start: "09:00", end: "17:00" },
       faq: wrightAiFaq,
       textBack:
-        "Hi, this is Wright AI Solutions. Sorry we missed your call! Reply here with what you need, or call back anytime and our assistant will pick up. Reply STOP to opt out.",
+        `Hi, this is Wright AI Solutions. This is an automated message. Sorry we missed your call! Reply here with what you need, or call back anytime and our assistant will pick up. Reply STOP to opt out. Privacy: ${env.PUBLIC_URL}/privacy`,
       caps: { callsPerDay: 100, textsPerDay: 50 },
     },
   ];

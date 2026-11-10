@@ -1,0 +1,2 @@
+# Breach plan (L22)
+1. Decide: Thomas Wright decides. 2. Contain: pause with the kill switch, rotate Twilio/Vapi/Cal.com keys, revoke access. 3. Assess with logs (Fly.io logs, vendor dashboards). 4. Notify: Arizona A.R.S. §18-552 (affected people within 45 days; AG if over 1,000 residents), other states' windows for affected callers, and the customer business without delay. 5. Record what happened and fix the cause.

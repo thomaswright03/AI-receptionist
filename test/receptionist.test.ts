@@ -335,6 +335,49 @@ describe("twilio voice switch", () => {
     expect(res.status).toBe(403);
   });
 
+  it("serves the privacy notice and terms", async () => {
+    const { deps } = setup();
+    const res = await createApp(deps).request("/privacy");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Privacy Notice");
+    expect((await createApp(deps).request("/terms")).status).toBe(200);
+  });
+
+  it.each(["REVOKE", "optout", "Stop texting me", "please don't text me again"])("treats %j as an opt-out", async (body) => {
+    const { deps, store } = setup();
+    await post(createApp(deps), "/twilio/sms", { To: NUMBER, From: CALLER, Body: body });
+    expect(await store.isOptedOut(CALLER)).toBe(true);
+  });
+
+  it("sends no text-back to an opted-out number on its next missed call", async () => {
+    const { deps, store } = setup();
+    const business = deps.businesses[0]!;
+    await store.setOptOut(CALLER, true);
+    expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_10AM }, business, CALLER, "no-answer")).toEqual({ sent: false, why: "caller opted out" });
+  });
+
+  it("text-back is automated, links the privacy notice, and the FAQ drops the unverified result", () => {
+    const { deps } = setup();
+    const b = deps.businesses[0]!;
+    expect(b.textBack).toMatch(/automated.*STOP.*\/privacy/);
+    expect(JSON.stringify(b.faq)).not.toMatch(/288|86,000/);
+  });
+
+  it("prompt routes emergencies to 911 and declines advice and promises", async () => {
+    const { deps } = setup();
+    const out = (await handleVapi(deps, { message: { type: "assistant-request", call } })) as { assistant: any };
+    const prompt: string = out.assistant.model.messages[0].content;
+    expect(prompt).toMatch(/hang up and call 911/);
+    expect(prompt).toMatch(/no medical, legal, tax or financial advice/);
+    expect(prompt).toMatch(/Never promise discounts, refunds, guarantees/);
+  });
+
+  it("stores the disclosure version on the call record", async () => {
+    const { deps, store } = setup();
+    await handleVapi(deps, { message: { type: "assistant-request", call } });
+    expect((await store.getCall(call.id))?.disclosureVersion).toBeTruthy();
+  });
+
   it("records STOP as an opt-out", async () => {
     const { deps, store } = setup();
     await post(createApp(deps), "/twilio/sms", { To: NUMBER, From: CALLER, Body: "STOP" });

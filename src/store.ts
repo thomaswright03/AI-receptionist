@@ -15,6 +15,9 @@ export interface CallRecord {
   summary?: string;
   transcript?: string;
   recordingUrl?: string;
+  /** Wording version of the AI + recording disclosure played at the start of the call, and when. */
+  disclosureVersion?: string;
+  disclosedAt?: string;
 }
 
 export interface Store {
