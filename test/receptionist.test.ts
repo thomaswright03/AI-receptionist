@@ -1,0 +1,254 @@
+import { describe, expect, it } from "vitest";
+import { createApp } from "../src/app.js";
+import { loadBusinesses, parseCalLink } from "../src/config/businesses.js";
+import { loadEnv } from "../src/config/env.js";
+import type { Notifier, Sent } from "../src/notify.js";
+import { withinHours } from "../src/safety/hours.js";
+import { memoryStore } from "../src/store.js";
+import { missedCallTextBack } from "../src/textBack.js";
+import { twilioSignature, validTwilioSignature } from "../src/twilio/signature.js";
+import { handleVapi, needsTextBack, type Deps } from "../src/vapi/handler.js";
+
+const NUMBER = "+16025550100";
+const OWNER = "+16025550199";
+const CALLER = "+14805550123";
+// Tuesday 2026-11-10, 10:00 in Phoenix (UTC-7, no daylight saving).
+const TUESDAY_10AM = new Date("2026-11-10T17:00:00Z");
+const TUESDAY_11PM = new Date("2026-11-11T06:00:00Z");
+
+function fakeNotify() {
+  const sent: Sent[] = [];
+  const notify: Notifier = {
+    async sms(to, from, body) {
+      const s = { channel: "sms" as const, to, from, body, dryRun: true, ok: true };
+      sent.push(s);
+      return s;
+    },
+    async email(to, subject, body) {
+      const s = { channel: "email" as const, to, subject, body, dryRun: true, ok: true };
+      sent.push(s);
+      return s;
+    },
+  };
+  return { notify, sent };
+}
+
+type Route = (url: string, init?: RequestInit) => Response | undefined;
+
+function fakeFetch(routes: Route[]): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    for (const r of routes) {
+      const res = r(url, init);
+      if (res) return res;
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }) as typeof fetch;
+}
+
+const slots: Route = (url) =>
+  url.includes("/v2/slots")
+    ? Response.json({ data: { "2026-11-11": [{ start: "2026-11-11T21:00:00.000Z" }, { start: "2026-11-11T22:00:00.000Z" }] } })
+    : undefined;
+
+function setup(opts: { now?: Date; routes?: Route[]; env?: Record<string, string> } = {}) {
+  const env = loadEnv({
+    WRIGHT_AI_NUMBER: NUMBER,
+    OWNER_PHONE_WRIGHT_AI: OWNER,
+    OWNER_EMAIL_WRIGHT_AI: "owner@example.com",
+    CAL_LINK_WRIGHT_AI: "https://cal.com/thomas/phone-call",
+    PUBLIC_URL: "https://receptionist.example.com",
+    ...opts.env,
+  });
+  const { notify, sent } = fakeNotify();
+  const store = memoryStore();
+  const deps: Deps = {
+    env,
+    businesses: loadBusinesses(env),
+    store,
+    notify,
+    fetch: fakeFetch([slots, ...(opts.routes ?? [])]),
+    now: () => opts.now ?? TUESDAY_10AM,
+  };
+  return { deps, sent, store };
+}
+
+const call = { id: "call-1", customer: { number: CALLER }, phoneNumber: { number: NUMBER } };
+
+describe("config", () => {
+  it("accepts only real Cal.com event links", () => {
+    expect(parseCalLink("https://cal.com/thomas/phone-call")).toEqual({ username: "thomas", slug: "phone-call" });
+    expect(parseCalLink("https://evil.com/thomas/phone-call")).toBeUndefined();
+    expect(parseCalLink("https://cal.com/thomas")).toBeUndefined();
+  });
+});
+
+describe("hours", () => {
+  const weekdays = { days: [1, 2, 3, 4, 5], start: "09:00", end: "17:00" };
+  it("uses the business's local time", () => {
+    expect(withinHours(weekdays, TUESDAY_10AM, "America/Phoenix")).toBe(true);
+    expect(withinHours(weekdays, TUESDAY_11PM, "America/Phoenix")).toBe(false);
+  });
+});
+
+describe("twilio signature", () => {
+  it("accepts a correctly signed request and rejects a tampered one", () => {
+    const params = { From: CALLER, To: NUMBER, CallStatus: "no-answer" };
+    const sig = twilioSignature("token", "https://x.test/twilio/status", params);
+    expect(validTwilioSignature("token", "https://x.test/twilio/status", params, sig)).toBe(true);
+    expect(validTwilioSignature("token", "https://x.test/twilio/status", { ...params, From: "+1999" }, sig)).toBe(false);
+    expect(validTwilioSignature("token", "https://x.test/twilio/status", params, undefined)).toBe(false);
+  });
+});
+
+describe("assistant-request", () => {
+  it("loads open times into the prompt and allows transfer in transfer hours", async () => {
+    const { deps } = setup();
+    const out = (await handleVapi(deps, { message: { type: "assistant-request", call } })) as { assistant: any };
+    const prompt: string = out.assistant.model.messages[0].content;
+    expect(prompt).toContain("Wednesday, November 11 at 2:00 PM");
+    expect(out.assistant.firstMessage).toMatch(/AI assistant.*recorded/);
+    const types = out.assistant.model.tools.map((t: any) => t.type === "function" ? t.function.name : t.type);
+    expect(types).toEqual(["book_discovery_call", "take_message", "transferCall", "endCall"]);
+  });
+
+  it("takes messages instead of transferring outside transfer hours", async () => {
+    const { deps } = setup({ now: TUESDAY_11PM });
+    const out = (await handleVapi(deps, { message: { type: "assistant-request", call } })) as { assistant: any };
+    expect(out.assistant.model.tools.some((t: any) => t.type === "transferCall")).toBe(false);
+    expect(out.assistant.model.messages[0].content).toContain("The owner is not available right now");
+  });
+
+  it("does not offer booking when the calendar can't be reached", async () => {
+    const { deps } = setup();
+    deps.fetch = fakeFetch([(u) => (u.includes("/v2/slots") ? new Response("down", { status: 500 }) : undefined)]);
+    const out = (await handleVapi(deps, { message: { type: "assistant-request", call } })) as { assistant: any };
+    expect(out.assistant.model.tools.some((t: any) => t.function?.name === "book_discovery_call")).toBe(false);
+    expect(out.assistant.model.messages[0].content).toContain("calendar could not be loaded");
+  });
+
+  it("hands the call to the owner once the daily call cap is hit", async () => {
+    const { deps, store } = setup();
+    for (let i = 0; i < 100; i++) await store.recordEvent("wright-ai", "call", CALLER, TUESDAY_10AM);
+    const out = await handleVapi(deps, { message: { type: "assistant-request", call } });
+    expect(out).toEqual({ destination: { type: "number", number: OWNER } });
+  });
+});
+
+describe("booking tool", () => {
+  const book = (args: Record<string, string>) => ({
+    message: { type: "tool-calls", call, toolCallList: [{ id: "t1", function: { name: "book_discovery_call", arguments: args } }] },
+  });
+  const goodArgs = { start: "2026-11-11T21:00:00.000Z", name: "Dana Ruiz", email: "dana@example.com", need: "Missed calls" };
+
+  it("books, confirms to the caller and alerts the owner the same minute", async () => {
+    const { deps, sent, store } = setup({
+      routes: [(u, init) => (u.endsWith("/v2/bookings") && init?.method === "POST" ? Response.json({ data: { uid: "b1", start: goodArgs.start } }) : undefined)],
+    });
+    const out = (await handleVapi(deps, book(goodArgs))) as { results: { result: string }[] };
+    expect(JSON.parse(out.results[0]!.result).booked).toBe(true);
+    expect(sent.map((s) => s.to)).toEqual([CALLER, OWNER, "owner@example.com"]);
+    expect((await store.getCall("call-1"))?.outcome).toBe("booked");
+  });
+
+  it("re-offers when the slot was just taken", async () => {
+    const { deps } = setup({
+      routes: [(u) => (u.endsWith("/v2/bookings") ? Response.json({ error: { message: "User has no available time slot" } }, { status: 409 }) : undefined)],
+    });
+    const out = (await handleVapi(deps, book(goodArgs))) as { results: { result: string }[] };
+    expect(JSON.parse(out.results[0]!.result).say).toMatch(/just taken/);
+  });
+
+  it("never says booked when Cal.com's answer is unclear, and alerts the owner", async () => {
+    const { deps, sent } = setup({ routes: [(u) => (u.endsWith("/v2/bookings") ? new Response("oops", { status: 502 }) : undefined)] });
+    const out = (await handleVapi(deps, book(goodArgs))) as { results: { result: string }[] };
+    const result = JSON.parse(out.results[0]!.result);
+    expect(result.booked).toBe(false);
+    expect(result.say).toMatch(/Do not say it is booked/);
+    expect(sent.some((s) => s.to === OWNER && s.body.startsWith("CHECK CAL.COM"))).toBe(true);
+  });
+
+  it("asks again for an incomplete email instead of booking", async () => {
+    const { deps, sent } = setup();
+    const out = (await handleVapi(deps, book({ ...goodArgs, email: "dana at gmail" }))) as { results: { result: string }[] };
+    expect(JSON.parse(out.results[0]!.result).booked).toBe(false);
+    expect(sent).toHaveLength(0);
+  });
+});
+
+describe("text-back", () => {
+  it("texts a missed caller once a day and alerts the owner", async () => {
+    const { deps, sent, store } = setup();
+    const business = deps.businesses[0]!;
+    const first = await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_10AM }, business, CALLER, "no-answer");
+    const second = await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_10AM }, business, CALLER, "no-answer");
+    expect(first).toEqual({ sent: true });
+    expect(second).toEqual({ sent: false, why: "already texted in the last 24 hours" });
+    expect(sent.filter((s) => s.to === CALLER)).toHaveLength(1);
+    expect(sent.filter((s) => s.to === OWNER)).toHaveLength(2);
+  });
+
+  it("respects quiet hours and opt-outs", async () => {
+    const { deps, store } = setup();
+    const business = deps.businesses[0]!;
+    expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_11PM }, business, CALLER, "x")).toEqual({ sent: false, why: "outside 8am-9pm" });
+    await store.setOptOut(CALLER, true);
+    expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_10AM }, business, CALLER, "x")).toEqual({ sent: false, why: "caller opted out" });
+  });
+
+  it("fires only for calls that failed before the caller got anywhere", () => {
+    expect(needsTextBack("pipeline-error-anthropic-llm-failed", 3, "unknown")).toBe(true);
+    expect(needsTextBack("customer-ended-call", 0, "unknown")).toBe(true);
+    expect(needsTextBack("customer-ended-call", 4, "unknown")).toBe(false);
+    expect(needsTextBack("assistant-ended-call", 1, "unknown")).toBe(false);
+    expect(needsTextBack("silence-timed-out", 0, "booked")).toBe(false);
+    expect(needsTextBack("assistant-forwarded-call", 2, "unknown")).toBe(false);
+  });
+});
+
+describe("twilio voice switch", () => {
+  const post = (app: ReturnType<typeof createApp>, path: string, form: Record<string, string>) =>
+    app.request(path, { method: "POST", body: new URLSearchParams(form), headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+
+  it("hands calls to Vapi while the agent runs", async () => {
+    const { deps } = setup();
+    const res = await post(createApp(deps), "/twilio/voice", { To: NUMBER, From: CALLER });
+    expect(await res.text()).toContain("<Redirect method=\"POST\">https://api.vapi.ai/twilio/inbound_call</Redirect>");
+  });
+
+  it("dials the owner when the kill switch is on, and texts back if they don't answer", async () => {
+    const { deps, sent } = setup({ env: { KILL_SWITCH: "on" } });
+    const app = createApp(deps);
+    const res = await post(app, "/twilio/voice", { To: NUMBER, From: CALLER });
+    expect(await res.text()).toContain(`<Dial timeout="20" action="https://receptionist.example.com/twilio/dial-result" method="POST">${OWNER}</Dial>`);
+    await post(app, "/twilio/dial-result", { To: NUMBER, From: CALLER, DialCallStatus: "no-answer" });
+    expect(sent.some((s) => s.to === CALLER)).toBe(true);
+  });
+
+  it("fails closed when the remote pause flag can't be read", async () => {
+    const { deps } = setup({ env: { KILL_SWITCH_URL: "https://flag.example.com/flag.json" } });
+    deps.fetch = fakeFetch([() => { throw new Error("down"); }]);
+    const res = await post(createApp(deps), "/twilio/voice", { To: NUMBER, From: CALLER });
+    expect(await res.text()).toContain("<Dial");
+  });
+
+  it("rejects unsigned Twilio requests when an auth token is set", async () => {
+    const { deps } = setup({ env: { TWILIO_AUTH_TOKEN: "secret" } });
+    const res = await post(createApp(deps), "/twilio/voice", { To: NUMBER, From: CALLER });
+    expect(res.status).toBe(403);
+  });
+
+  it("records STOP as an opt-out", async () => {
+    const { deps, store } = setup();
+    await post(createApp(deps), "/twilio/sms", { To: NUMBER, From: CALLER, Body: "STOP" });
+    expect(await store.isOptedOut(CALLER)).toBe(true);
+  });
+});
+
+describe("vapi auth", () => {
+  it("rejects server messages without the shared secret", async () => {
+    const { deps } = setup({ env: { VAPI_SECRET: "s3cret" } });
+    const res = await createApp(deps).request("/vapi", { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
+    expect(res.status).toBe(401);
+  });
+});
