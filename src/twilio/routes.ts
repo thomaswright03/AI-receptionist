@@ -1,6 +1,6 @@
 import type { Business } from "../config/types.js";
 import { businessForNumber } from "../config/businesses.js";
-import { agentPaused } from "../safety/killswitch.js";
+import { agentPaused, ownerCommand } from "../safety/killswitch.js";
 import { handleOptOut, missedCallTextBack } from "../textBack.js";
 import type { Deps } from "../vapi/handler.js";
 
@@ -19,12 +19,30 @@ export type Params = Record<string, string>;
 export async function voice(deps: Deps, p: Params): Promise<string> {
   const business = businessForNumber(deps.businesses, p.To);
   if (!business) return twiml("<Say>This number is not in service.</Say><Hangup/>");
-  const paused = await agentPaused(deps.env, deps.fetch);
+  const paused = await pauseCheck(deps, business);
   if (!paused.paused) {
     return twiml(`<Redirect method="POST">${xml(deps.env.VAPI_TWILIO_INBOUND_URL)}</Redirect>`);
   }
   console.log(JSON.stringify({ event: "agent.paused", business: business.id, why: paused.why }));
   return dialOwner(deps, business);
+}
+
+/** The 1.5-second budget is the whole check: a slow or failing check counts as paused. */
+export const PAUSE_BUDGET_MS = 1500;
+
+async function pauseCheck(deps: Deps, business: Business): Promise<{ paused: boolean; why: string }> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<{ paused: boolean; why: string }>((resolve) => {
+    timer = setTimeout(() => resolve({ paused: true, why: "pause check timed out" }), PAUSE_BUDGET_MS);
+  });
+  try {
+    return await Promise.race([
+      agentPaused(deps, business).catch((err: unknown) => ({ paused: true, why: `pause check failed: ${String(err)}` })),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function dialOwner(deps: Deps, business: Business): string {
@@ -53,12 +71,20 @@ export async function status(deps: Deps, p: Params): Promise<void> {
   await missedCallTextBack({ store: deps.store, notify: deps.notify, now: deps.now?.() }, business, p.From ?? "", `call ${p.CallStatus}`);
 }
 
-/** Inbound texts: honour STOP/START, forward everything else to the owner. */
+/**
+ * Inbound texts. From the owner's own cell: PAUSE / RESUME / STATUS, each
+ * answered with a confirmation. From anyone: STOP/START honoured, everything
+ * else forwarded to the owner.
+ */
 export async function sms(deps: Deps, p: Params): Promise<string> {
   const from = p.From ?? "";
   const body = p.Body ?? "";
-  if (await handleOptOut(deps.store, from, body)) return twiml("");
   const business = businessForNumber(deps.businesses, p.To);
+  if (business && business.ownerPhone && from === business.ownerPhone) {
+    const reply = await ownerCommand(deps, business, body);
+    if (reply) return twiml(`<Message>${xml(reply)}</Message>`);
+  }
+  if (await handleOptOut(deps.store, from, body)) return twiml("");
   if (business?.ownerPhone && p.To) {
     await deps.notify.sms(business.ownerPhone, p.To, `Text from ${from}: ${body}`);
   }

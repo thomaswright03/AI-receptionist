@@ -31,17 +31,41 @@ Plan: https://claude.ai/artifact/91wucVfWdBXVbStkszR8Ta
 Config is shaped **business → flow → shared tools**: `src/config/businesses.ts`,
 `src/flows/`, and the tool code in `src/vapi/handler.ts`.
 
-## Safety
+## Kill switch, watchdog and fallback
+
+A pause sends **new** calls to the owner's cell; calls already with the agent
+finish. Any one switch set means paused; all must be clear for the agent to
+answer, and a pause overrides transfer hours.
+
+| Switch | Set by | Cleared by |
+|---|---|---|
+| Owner pause | Owner texts `PAUSE` to the business number from their own cell (confirmed by reply; `STATUS` shows state) | `RESUME` |
+| Service-wide | `KILL_SWITCH=on` (or remote `KILL_SWITCH_URL` not saying `{"paused": false}`) | Setting it back |
+| Watchdog | 3 failed checks in a row of `WATCHDOG_URLS` (texts the owner) | 3 good checks in a row (texts again) |
+
+The whole pause check has a 1.5-second budget; a timeout or error counts as
+paused. If this service is down, the Twilio number's Voice Fallback URL (a
+static TwiML Bin dialing the owner) answers instead.
+
+## Other safety rules
 
 - `DRY_RUN=true` (default) logs texts and emails instead of sending.
-- `KILL_SWITCH=on`, or a remote `KILL_SWITCH_URL` returning anything but
-  `{"paused": false}` (including unreachable), sends every call to the owner.
-- Per-business daily call and text caps; over the call cap, calls go to the owner.
-- Text-backs: once per caller per 24 hours, 8am-9pm local only, STOP honoured.
-- The agent never takes card numbers, never invents prices, and discloses it
-  is an AI and that calls are recorded.
+- `AGENT_MODE=stub` (week 1): the agent only discloses and hands off.
+- The first sentence says it's an AI and the call is recorded.
+- Transfer rules in the prompt (`TRANSFER_TRIGGERS`): a request for a person,
+  complaints, billing, legal, harm, large jobs, Spanish. Transfer happens with
+  no confirming question; outside transfer hours, a message is taken instead.
+- Bookings are idempotent: one Cal.com attempt per key and one booking per
+  call; an unclear answer is never retried or reported as booked.
+- Owner texts only for what needs action now (failed/unclear bookings, urgent
+  messages, missed calls, watchdog); bookings and routine messages go to email.
+- Text-backs: a one-time reply to the caller's own call, once per 24 hours,
+  8am-9pm local, STOP honoured. Daily call and text caps per business.
+- The agent never takes card numbers or quotes anything outside the approved FAQ.
 - Twilio webhooks require a valid `X-Twilio-Signature`; Vapi messages require
   `X-Vapi-Secret` when `VAPI_SECRET` is set.
+
+Schema: `db/schema.sql` (Postgres; the code still uses the in-memory store).
 
 ## Run
 

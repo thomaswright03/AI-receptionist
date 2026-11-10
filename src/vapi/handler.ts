@@ -5,9 +5,10 @@ import { getFlow } from "../flows/index.js";
 import type { Notifier } from "../notify.js";
 import { withinHours } from "../safety/hours.js";
 import type { Store } from "../store.js";
+import type { Watchdog } from "../safety/watchdog.js";
 import { missedCallTextBack } from "../textBack.js";
 import { bookCall, openTimes } from "../tools/calcom.js";
-import { buildAssistant, spokenTime } from "./assistant.js";
+import { buildAssistant, buildStubAssistant, spokenTime } from "./assistant.js";
 
 // Everything Vapi sends to our server URL arrives here as { message: {...} }.
 // https://docs.vapi.ai/server-url/events
@@ -17,6 +18,7 @@ export interface Deps {
   businesses: Business[];
   store: Store;
   notify: Notifier;
+  watchdog?: Watchdog;
   fetch?: typeof fetch;
   now?: () => Date;
 }
@@ -82,11 +84,12 @@ async function assistantRequest(deps: Deps, m: VapiMessage): Promise<Record<stri
   if (m.call?.id) {
     await deps.store.saveCall({ callId: m.call.id, businessId: business.id, caller: callerOf(m), startedAt: now.toISOString(), outcome: "unknown" });
   }
+  const canTransfer = Boolean(business.ownerPhone) && withinHours(business.transferHours, now, business.timeZone);
+  if (deps.env.AGENT_MODE === "stub") return { assistant: buildStubAssistant(deps.env, business, { canTransfer }) };
   const flow = getFlow(business.flowId);
   const times = business.cal
     ? await openTimes(business.cal, now, new Date(now.getTime() + WEEK), deps.env.CAL_API_KEY, deps.fetch)
     : null;
-  const canTransfer = Boolean(business.ownerPhone) && withinHours(business.transferHours, now, business.timeZone);
   return { assistant: buildAssistant(deps.env, business, flow, { now, openTimes: times?.slice(0, 15) ?? null, canTransfer }) };
 }
 
@@ -126,6 +129,19 @@ async function runTool(
     if (!email || !EMAIL.test(email.trim())) {
       return { booked: false, say: "That email doesn't look complete. Spell it back once more, or take a message if they'd rather not." };
     }
+    // One stable key per booking attempt: a retried tool call, or the model
+    // calling twice, never books twice. A pending or unclear attempt is never
+    // retried from the call; the owner reconciles it in Cal.com.
+    const key = `booking:${business.id}:${callId ?? caller}:${start}:${email.trim().toLowerCase()}`;
+    const prior = await deps.store.getFlag(key);
+    const callBooked = callId ? await deps.store.getFlag(`booked-call:${callId}`) : undefined;
+    if (prior?.startsWith("booked") || callBooked) {
+      return { booked: true, say: "This call already has a booking. Confirm it with the caller; don't book again." };
+    }
+    if (prior === "pending" || prior === "uncertain") {
+      return { booked: false, say: "Say the owner will confirm the time by text shortly. Do not say it is booked." };
+    }
+    await deps.store.setFlag(key, "pending");
     const result = await bookCall(
       business.cal,
       {
@@ -141,27 +157,41 @@ async function runTool(
     );
     const when = spokenTime(start, business.timeZone);
     if (result.booked) {
-      if (callId) await deps.store.saveCall({ ...(await baseCall(deps, callId, business, caller)), outcome: "booked" });
-      if (from) {
-        await deps.notify.sms(caller, from, `You're booked with ${business.name} for ${when}. A calendar invite is on its way to ${email.trim()}.`);
-        if (business.ownerPhone) await deps.notify.sms(business.ownerPhone, from, `New booking by phone: ${who} (${caller}), ${when}. Need: ${need}`);
+      await deps.store.setFlag(key, `booked:${result.uid}`);
+      if (callId) {
+        await deps.store.setFlag(`booked-call:${callId}`, result.uid);
+        await deps.store.saveCall({ ...(await baseCall(deps, callId, business, caller)), outcome: "booked" });
       }
+      // Caller gets a text confirmation; the owner gets email (texts are kept for what needs action now).
+      if (from) await deps.notify.sms(caller, from, `You're booked with ${business.name} for ${when}. A calendar invite is on its way to ${email.trim()}. Reply STOP to opt out.`);
       await deps.notify.email(business.ownerEmail, `Phone booking: ${who}, ${when}`, `${who}\n${business_name ?? ""}\n${caller}\n${email}\n\nNeed: ${need}`);
       return { booked: true, say: `Booked for ${when}. Tell them an invite is going to their email and a text confirmation to their phone.` };
     }
-    if (result.reason === "taken") return { booked: false, say: "That time was just taken. Apologise and offer the next open times." };
-    if (result.reason === "uncertain" && from && business.ownerPhone) {
-      await deps.notify.sms(business.ownerPhone, from, `CHECK CAL.COM: booking for ${who} (${caller}, ${email}) at ${when} may or may not have gone through. Need: ${need}`);
+    if (result.reason === "taken") {
+      await deps.store.setFlag(key, undefined);
+      return { booked: false, say: "That time was just taken. Apologise and offer the next open times." };
+    }
+    if (result.reason === "uncertain") {
+      await deps.store.setFlag(key, "uncertain");
+      if (from && business.ownerPhone) {
+        await deps.notify.sms(business.ownerPhone, from, `CHECK CAL.COM: booking for ${who} (${caller}, ${email}) at ${when} may or may not have gone through. Need: ${need}`);
+      }
       return { booked: false, say: "Say the owner will confirm the time by text shortly. Do not say it is booked." };
+    }
+    await deps.store.setFlag(key, undefined);
+    if (from && business.ownerPhone) {
+      await deps.notify.sms(business.ownerPhone, from, `Booking FAILED for ${who} (${caller}, ${email}) at ${when}. Please call them back. Need: ${need}`);
     }
     return { booked: false, say: "Booking failed. Take a message instead and say the owner will call back to set a time." };
   }
   if (name === "take_message") {
     const who = args.name ?? "Unknown caller";
     const back = args.callback_number || caller;
+    const urgent = String(args.urgent) === "true";
     if (callId) await deps.store.saveCall({ ...(await baseCall(deps, callId, business, caller)), outcome: "message" });
-    if (from && business.ownerPhone) await deps.notify.sms(business.ownerPhone, from, `Message from ${who} (${back}): ${args.message ?? ""}`);
-    await deps.notify.email(business.ownerEmail, `Phone message: ${who}`, `${who}\n${back}\n\n${args.message ?? ""}`);
+    // Urgent messages text the owner now; routine ones go to email.
+    if (urgent && from && business.ownerPhone) await deps.notify.sms(business.ownerPhone, from, `URGENT message from ${who} (${back}): ${args.message ?? ""}`);
+    await deps.notify.email(business.ownerEmail, `${urgent ? "URGENT " : ""}Phone message: ${who}`, `${who}\n${back}\n\n${args.message ?? ""}`);
     return { ok: true, say: "Message passed on. Tell them the owner will call them back, today if possible." };
   }
   return { ok: false, say: "Unknown tool." };

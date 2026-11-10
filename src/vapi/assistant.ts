@@ -20,6 +20,37 @@ export function spokenTime(iso: string, timeZone: string): string {
   }).format(new Date(iso));
 }
 
+// Call types that always go to a person (plan: Safety, written transfer
+// rules). Each is a row in docs/qa-cases.md.
+export const TRANSFER_TRIGGERS = [
+  "the caller asks for a person, a human, the owner or Thomas, at any point",
+  "a complaint, or a problem with work we already did for them",
+  "a billing dispute",
+  "a legal threat",
+  "harm or damage our work caused",
+  "a large or unusual job (franchise, many locations, enterprise)",
+  "the caller speaks Spanish or another language you can't continue in",
+];
+
+function transferRules(canTransfer: boolean): string[] {
+  const triggers = TRANSFER_TRIGGERS.map((t) => `  - ${t}`);
+  return canTransfer
+    ? [
+        "- Transfer the call to the owner right away, with no confirming question and no troubleshooting, when:",
+        ...triggers,
+        "- Also transfer if the caller is upset or you are stuck.",
+      ]
+    : [
+        "- The owner is not available right now, so never try to transfer. Instead, when any of these happen, get their name and call take_message (urgent: true for complaints, billing, legal or harm), then say the owner will call back:",
+        ...triggers,
+      ];
+}
+
+export function greeting(business: Business): string {
+  // Disclosure first: Vapi records from the first second.
+  return `This is ${business.agentName}, an AI assistant for ${business.name}, and this call is recorded. How can I help?`;
+}
+
 export function systemPrompt(
   business: Business,
   flow: Flow,
@@ -45,7 +76,8 @@ export function systemPrompt(
     "",
     "FIRST, SORT THE CALL",
     "- If the caller is selling something (marketing, SEO, leads, software, loans), or is clearly another automated voice agent, say: 'Thanks for calling. We're not taking sales calls by phone, but you're welcome to email us. Have a good day.' Then end the call.",
-    "- If it is a wrong number, say so kindly and end the call.",
+    "- If the other side keeps repeating itself, talks over you, or you have asked the same question twice with no progress, say goodbye and end the call. Never loop.",
+    "- If it is a wrong number, say so kindly, say who you are, and offer to help; end the call if they don't need anything.",
     "",
     "ANSWERING QUESTIONS",
     "- Answer only from the approved answers below, in your own words. If a question is not covered, say the owner can answer that on a short call, and offer to book one.",
@@ -57,18 +89,18 @@ export function systemPrompt(
     "TO BOOK A CALL, LEARN",
     ...flow.questions.map((q) => `- ${q}`),
     "- Always ask the caller's name, even if they called before.",
-    "- If they have no email or won't give one, call take_message instead with what they need, and tell them the owner will call them back.",
+    "- If they have no email or won't give one, call take_message instead (urgent: true) with what they need, and tell them the owner will call them back to book.",
     "",
     "OPEN TIMES (offer at most three at once; use the exact start value when booking)",
     times,
+    "",
+    "WHEN A PERSON MUST TAKE OVER",
+    ...transferRules(ctx.canTransfer),
     "",
     "RULES",
     ...flow.rules.map((r) => `- ${r}`),
     "- If book_discovery_call says the time was just taken, apologise and offer the next open times.",
     "- If book_discovery_call says it is unsure, tell the caller the owner will confirm by text shortly. Do not say it is booked.",
-    ctx.canTransfer
-      ? "- If the caller asks for a person, is upset, has an urgent problem, or you are stuck, transfer the call to the owner."
-      : "- The owner is not available right now. If the caller asks for a person or you are stuck, call take_message and say the owner will call back.",
     "- Say goodbye and end the call once the caller is done.",
   ].join("\n");
 }
@@ -117,6 +149,7 @@ export function buildAssistant(
             name: { type: "string" },
             message: { type: "string", description: "What the caller needs, in their words." },
             callback_number: { type: "string", description: "Only if different from the number they called from." },
+            urgent: { type: "boolean", description: "True for complaints, billing disputes, legal threats or harm." },
           },
           required: ["name", "message"],
         },
@@ -136,7 +169,7 @@ export function buildAssistant(
 
   return {
     name: `${business.id}-${flow.id}`,
-    firstMessage: `Thanks for calling ${business.name}, this is ${business.agentName}, an AI assistant. Calls are recorded and may be used for quality and demos. How can I help?`,
+    firstMessage: greeting(business),
     model: {
       provider: env.VAPI_MODEL_PROVIDER,
       model: env.VAPI_MODEL,
@@ -152,4 +185,26 @@ export function buildAssistant(
     maxDurationSeconds: 900,
     metadata: { businessId: business.id, flowId: flow.id },
   };
+}
+
+/**
+ * Week-1 stub: answers, discloses, and hands off. No conversation, so the
+ * phone plumbing (transfer, fallback, kill switch) can be tested on the real
+ * number before the full flow exists. AGENT_MODE=stub.
+ */
+export function buildStubAssistant(
+  env: Env,
+  business: Business,
+  ctx: { canTransfer: boolean },
+): Record<string, unknown> {
+  const full = buildAssistant(env, business, { id: "stub", purpose: "", questions: [], tools: ["take_message"], rules: [] }, {
+    now: new Date(),
+    openTimes: null,
+    canTransfer: ctx.canTransfer,
+  });
+  const prompt = ctx.canTransfer
+    ? "You are a receptionist in test mode. After the greeting, say 'Let me connect you with Thomas' and transfer the call right away. Do nothing else."
+    : "You are a receptionist in test mode. Thomas is not available. Ask for the caller's name and what they need, call take_message, say Thomas will call back, then end the call. Do nothing else.";
+  const model = full.model as Record<string, unknown>;
+  return { ...full, name: `${business.id}-stub`, model: { ...model, messages: [{ role: "system", content: prompt }] } };
 }

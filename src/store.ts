@@ -26,12 +26,16 @@ export interface Store {
   lastTextTo(businessId: string, to: string): Promise<Date | undefined>;
   isOptedOut(phone: string): Promise<boolean>;
   setOptOut(phone: string, optedOut: boolean): Promise<void>;
+  /** Small switches that must survive between requests (e.g. a business paused by its owner). */
+  getFlag(key: string): Promise<string | undefined>;
+  setFlag(key: string, value: string | undefined): Promise<void>;
 }
 
 export function memoryStore(): Store {
   const calls = new Map<string, CallRecord>();
   const events: { businessId: string; kind: "call" | "text"; to: string; at: Date }[] = [];
   const optedOut = new Set<string>();
+  const flags = new Map<string, string>();
   return {
     async saveCall(call) {
       calls.set(call.callId, { ...calls.get(call.callId), ...call });
@@ -55,6 +59,13 @@ export function memoryStore(): Store {
     async setOptOut(phone, value) {
       if (value) optedOut.add(phone);
       else optedOut.delete(phone);
+    },
+    async getFlag(key) {
+      return flags.get(key);
+    },
+    async setFlag(key, value) {
+      if (value === undefined) flags.delete(key);
+      else flags.set(key, value);
     },
   };
 }

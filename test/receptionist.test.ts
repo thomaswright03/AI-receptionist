@@ -8,6 +8,7 @@ import { memoryStore } from "../src/store.js";
 import { missedCallTextBack } from "../src/textBack.js";
 import { twilioSignature, validTwilioSignature } from "../src/twilio/signature.js";
 import { handleVapi, needsTextBack, type Deps } from "../src/vapi/handler.js";
+import { Watchdog, watchdogTick } from "../src/safety/watchdog.js";
 
 const NUMBER = "+16025550100";
 const OWNER = "+16025550199";
@@ -112,6 +113,29 @@ describe("assistant-request", () => {
     expect(types).toEqual(["book_discovery_call", "take_message", "transferCall", "endCall"]);
   });
 
+  it("states AI and recording in the very first sentence", async () => {
+    const { deps } = setup();
+    const out = (await handleVapi(deps, { message: { type: "assistant-request", call } })) as { assistant: any };
+    expect(out.assistant.firstMessage.split(",")[0]).toBe("This is Ava");
+    expect(out.assistant.firstMessage).toMatch(/^This is Ava, an AI assistant for Wright AI Solutions, and this call is recorded\./);
+  });
+
+  it("lists the transfer rules and transfers without a confirming question", async () => {
+    const { deps } = setup();
+    const out = (await handleVapi(deps, { message: { type: "assistant-request", call } })) as { assistant: any };
+    const prompt: string = out.assistant.model.messages[0].content;
+    expect(prompt).toContain("with no confirming question");
+    for (const t of ["billing dispute", "legal threat", "Spanish", "franchise"]) expect(prompt).toContain(t);
+  });
+
+  it("week-1 stub only discloses and hands off", async () => {
+    const { deps } = setup({ env: { AGENT_MODE: "stub" } });
+    const out = (await handleVapi(deps, { message: { type: "assistant-request", call } })) as { assistant: any };
+    expect(out.assistant.model.messages[0].content).toMatch(/test mode.*transfer the call right away/);
+    expect(out.assistant.model.tools.some((t: any) => t.function?.name === "book_discovery_call")).toBe(false);
+    expect(out.assistant.model.tools.some((t: any) => t.type === "transferCall")).toBe(true);
+  });
+
   it("takes messages instead of transferring outside transfer hours", async () => {
     const { deps } = setup({ now: TUESDAY_11PM });
     const out = (await handleVapi(deps, { message: { type: "assistant-request", call } })) as { assistant: any };
@@ -147,8 +171,28 @@ describe("booking tool", () => {
     });
     const out = (await handleVapi(deps, book(goodArgs))) as { results: { result: string }[] };
     expect(JSON.parse(out.results[0]!.result).booked).toBe(true);
-    expect(sent.map((s) => s.to)).toEqual([CALLER, OWNER, "owner@example.com"]);
+    // Caller texted; owner emailed, not texted (texts are only for what needs action now).
+    expect(sent.map((s) => s.to)).toEqual([CALLER, "owner@example.com"]);
     expect((await store.getCall("call-1"))?.outcome).toBe("booked");
+  });
+
+  it("never books twice for the same call, even if the tool is called again", async () => {
+    let posts = 0;
+    const { deps } = setup({
+      routes: [(u, init) => (u.endsWith("/v2/bookings") && init?.method === "POST" ? (posts++, Response.json({ data: { uid: "b1", start: goodArgs.start } })) : undefined)],
+    });
+    await handleVapi(deps, book(goodArgs));
+    const again = (await handleVapi(deps, book({ ...goodArgs, start: "2026-11-11T22:00:00.000Z" }))) as { results: { result: string }[] };
+    expect(posts).toBe(1);
+    expect(JSON.parse(again.results[0]!.result).say).toMatch(/already has a booking/);
+  });
+
+  it("does not retry an unclear booking from the call", async () => {
+    let posts = 0;
+    const { deps } = setup({ routes: [(u) => (u.endsWith("/v2/bookings") ? (posts++, new Response("oops", { status: 502 })) : undefined)] });
+    await handleVapi(deps, book(goodArgs));
+    await handleVapi(deps, book(goodArgs));
+    expect(posts).toBe(1);
   });
 
   it("re-offers when the slot was just taken", async () => {
@@ -173,6 +217,20 @@ describe("booking tool", () => {
     const out = (await handleVapi(deps, book({ ...goodArgs, email: "dana at gmail" }))) as { results: { result: string }[] };
     expect(JSON.parse(out.results[0]!.result).booked).toBe(false);
     expect(sent).toHaveLength(0);
+  });
+});
+
+describe("messages", () => {
+  const message = (args: Record<string, unknown>) => ({
+    message: { type: "tool-calls", call, toolCallList: [{ id: "t1", function: { name: "take_message", arguments: args } }] },
+  });
+  it("texts the owner only for urgent messages; routine ones go to email", async () => {
+    const routine = setup();
+    await handleVapi(routine.deps, message({ name: "Dana", message: "call me about a website" }));
+    expect(routine.sent.map((s) => s.channel)).toEqual(["email"]);
+    const urgent = setup();
+    await handleVapi(urgent.deps, message({ name: "Dana", message: "your bot texted my customers at 3am", urgent: true }));
+    expect(urgent.sent.map((s) => [s.channel, s.to])).toEqual([["sms", OWNER], ["email", "owner@example.com"]]);
   });
 });
 
@@ -232,6 +290,45 @@ describe("twilio voice switch", () => {
     expect(await res.text()).toContain("<Dial");
   });
 
+  it("fails closed when the pause check is slower than its 1.5-second budget", async () => {
+    const { deps } = setup({ env: { KILL_SWITCH_URL: "https://flag.example.com/flag.json" } });
+    deps.fetch = (() => new Promise(() => {})) as typeof fetch; // never answers
+    const started = Date.now();
+    const res = await post(createApp(deps), "/twilio/voice", { To: NUMBER, From: CALLER });
+    expect(await res.text()).toContain("<Dial");
+    expect(Date.now() - started).toBeLessThan(2500);
+  });
+
+  it("PAUSE, STATUS and RESUME by text from the owner's cell, each confirmed", async () => {
+    const { deps } = setup();
+    const app = createApp(deps);
+    const pause = await (await post(app, "/twilio/sms", { To: NUMBER, From: OWNER, Body: "pause" })).text();
+    expect(pause).toContain("<Message>Paused, callers now ring your cell. Reply RESUME to undo.</Message>");
+    expect(await (await post(app, "/twilio/voice", { To: NUMBER, From: CALLER })).text()).toContain("<Dial");
+    expect(await (await post(app, "/twilio/sms", { To: NUMBER, From: OWNER, Body: "STATUS" })).text()).toContain("paused by owner text");
+    const resume = await (await post(app, "/twilio/sms", { To: NUMBER, From: OWNER, Body: "RESUME" })).text();
+    expect(resume).toContain("Resumed");
+    expect(await (await post(app, "/twilio/voice", { To: NUMBER, From: CALLER })).text()).toContain("<Redirect");
+  });
+
+  it("ignores PAUSE from anyone but the owner", async () => {
+    const { deps, sent } = setup();
+    const app = createApp(deps);
+    await post(app, "/twilio/sms", { To: NUMBER, From: CALLER, Body: "PAUSE" });
+    expect(await (await post(app, "/twilio/voice", { To: NUMBER, From: CALLER })).text()).toContain("<Redirect");
+    expect(sent.some((s) => s.to === OWNER && s.body.includes("PAUSE"))).toBe(true); // forwarded as a normal text
+  });
+
+  it("keeps calls with the owner while the watchdog is tripped, and an owner RESUME doesn't clear it", async () => {
+    const { deps } = setup();
+    deps.watchdog = new Watchdog();
+    for (let i = 0; i < 3; i++) deps.watchdog.record(false, "vapi down");
+    const app = createApp(deps);
+    const resume = await (await post(app, "/twilio/sms", { To: NUMBER, From: OWNER, Body: "RESUME" })).text();
+    expect(resume).toContain("still ring you: watchdog tripped");
+    expect(await (await post(app, "/twilio/voice", { To: NUMBER, From: CALLER })).text()).toContain("<Dial");
+  });
+
   it("rejects unsigned Twilio requests when an auth token is set", async () => {
     const { deps } = setup({ env: { TWILIO_AUTH_TOKEN: "secret" } });
     const res = await post(createApp(deps), "/twilio/voice", { To: NUMBER, From: CALLER });
@@ -242,6 +339,32 @@ describe("twilio voice switch", () => {
     const { deps, store } = setup();
     await post(createApp(deps), "/twilio/sms", { To: NUMBER, From: CALLER, Body: "STOP" });
     expect(await store.isOptedOut(CALLER)).toBe(true);
+  });
+});
+
+describe("watchdog", () => {
+  it("trips after 3 failures in a row and restores after 3 successes, alerting on both", async () => {
+    const w = new Watchdog();
+    const texts: string[] = [];
+    const sms = async (_to: string, _from: string, body: string) => { texts.push(body); };
+    let up = false;
+    const f = (async () => (up ? new Response("ok") : new Response("down", { status: 503 }))) as typeof fetch;
+    const owners = [{ phone: OWNER, from: NUMBER }];
+    const ticks = [];
+    for (let i = 0; i < 3; i++) ticks.push(await watchdogTick(w, ["https://vapi.test/health"], owners, sms, f));
+    expect(ticks).toEqual([null, null, "tripped"]);
+    up = true;
+    expect(await watchdogTick(w, ["https://vapi.test/health"], owners, sms, f)).toBe(null);
+    expect(w.healthy).toBe(false);
+    await watchdogTick(w, ["https://vapi.test/health"], owners, sms, f);
+    expect(await watchdogTick(w, ["https://vapi.test/health"], owners, sms, f)).toBe("restored");
+    expect(texts).toHaveLength(2);
+  });
+
+  it("a single blip doesn't flip the line", () => {
+    const w = new Watchdog();
+    w.record(false); w.record(false); w.record(true); w.record(false); w.record(false);
+    expect(w.healthy).toBe(true);
   });
 });
 

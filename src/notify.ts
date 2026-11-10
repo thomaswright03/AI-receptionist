@@ -3,6 +3,9 @@ import type { Env } from "./config/env.js";
 // Texts and emails. With DRY_RUN=true (the default) nothing is sent; each
 // message is logged and returned so tests and the first live runs can see it.
 
+/** Per-dependency timeout for Twilio and Resend. No retries: a retried send could text twice. */
+const TIMEOUT_MS = 5000;
+
 export interface Sent {
   channel: "sms" | "email";
   to: string;
@@ -37,6 +40,7 @@ export function notifier(env: Env, fetchImpl: typeof fetch = fetch): Notifier {
             method: "POST",
             headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({ To: to, From: from, Body: body }),
+            signal: AbortSignal.timeout(TIMEOUT_MS),
           },
         );
         return response.ok ? base : { ...base, ok: false, error: `Twilio ${response.status}` };
@@ -56,6 +60,7 @@ export function notifier(env: Env, fetchImpl: typeof fetch = fetch): Notifier {
           method: "POST",
           headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
           body: JSON.stringify({ from: env.EMAIL_FROM, to, subject, text: body }),
+          signal: AbortSignal.timeout(TIMEOUT_MS),
         });
         return response.ok ? base : { ...base, ok: false, error: `Resend ${response.status}` };
       } catch (err) {

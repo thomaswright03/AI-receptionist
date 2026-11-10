@@ -23,6 +23,10 @@ const schema = z.object({
   KILL_SWITCH: z.enum(["on", "off"]).default("off"),
   /** Optional remote flag: JSON {"paused": true} pauses the agent. Fails closed when set and unreachable. */
   KILL_SWITCH_URL: z.string().url().optional(),
+  /** Comma-separated URLs the watchdog checks every minute (e.g. Vapi's status endpoint). Empty = watchdog off. */
+  WATCHDOG_URLS: z.string().default(""),
+  /** "stub" = week-1 agent that only discloses and hands off; "full" = the whole flow. */
+  AGENT_MODE: z.enum(["stub", "full"]).default("full"),
   /** "true" logs texts and emails instead of sending them. */
   DRY_RUN: z.enum(["true", "false"]).default("true"),
   OWNER_PHONE_WRIGHT_AI: z.string().optional(),
