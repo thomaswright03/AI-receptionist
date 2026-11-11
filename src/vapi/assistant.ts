@@ -173,9 +173,12 @@ export function buildAssistant(
           message: "One moment, I'm connecting you now.",
           description: "The owner",
           // If the owner doesn't pick up, the call comes back to the agent, who takes a message.
-          // Field names follow Vapi's transferPlan; verify on the first live transfer test (qa row 17).
+          // Field names checked against Vapi's API reference (https://docs.vapi.ai/api-reference/tools/create,
+          // https://docs.vapi.ai/calls/assistant-based-warm-transfer): transferPlan.mode, .message, and
+          // .fallbackPlan { message, endCallEnabled }. Per that reference fallbackPlan applies to
+          // "warm-transfer-experimental". Live confirmation still waits on a Vapi account (qa row 17).
           transferPlan: {
-            mode: "warm-transfer-say-message",
+            mode: "warm-transfer-experimental",
             message: "Hello, I have a caller on the line for you.",
             fallbackPlan: { message: "I couldn't reach them just now. Let me take a message instead.", endCallEnabled: false },
           },

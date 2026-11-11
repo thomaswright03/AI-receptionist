@@ -28,6 +28,8 @@ export function createApp(deps: Deps): Hono {
     return miss;
   };
 
+  app.get("/", (c) => c.text("AI Receptionist, a phone and text service by Wright AI Solutions.\nPrivacy: /privacy\nTerms: /terms\n"));
+
   app.get("/health", (c) => {
     const dryRun = deps.env.DRY_RUN !== "false";
     const missing = dryRun ? [] : missingConfig();

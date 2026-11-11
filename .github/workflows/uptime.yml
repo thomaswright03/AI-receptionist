@@ -1,5 +1,6 @@
 name: Uptime
 # Outside check on the deployed /health. Fails (and GitHub emails the repo owner) when the service is down.
+# The free Render host sleeps when idle and takes 30-60 s to wake, hence the 90 s timeout.
 # Set the repo variable DEPLOY_URL (e.g. https://ai-receptionist.onrender.com) to turn it on.
 on:
   schedule:
@@ -10,4 +11,4 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ vars.DEPLOY_URL != '' }}
     steps:
-      - run: curl --fail --silent --show-error --max-time 20 --retry 2 --retry-delay 10 "${{ vars.DEPLOY_URL }}/health"
+      - run: curl --fail --silent --show-error --max-time 90 --retry 2 --retry-delay 15 "${{ vars.DEPLOY_URL }}/health"

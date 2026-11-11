@@ -151,11 +151,14 @@ describe("assistant-request", () => {
     expect(out.assistant.model.messages[0].content).toContain("calendar could not be loaded");
   });
 
-  it("hands the call to the owner once the daily call cap is hit", async () => {
+  it("sends the call to the owner (with a fallback) once the daily call cap is hit", async () => {
     const { deps, store } = setup();
     for (let i = 0; i < 100; i++) await store.recordEvent("wright-ai", "call", CALLER, TUESDAY_10AM);
     const out = await handleVapi(deps, { message: { type: "assistant-request", call } });
-    expect(out).toEqual({ destination: { type: "number", number: OWNER } });
+    // The owner takes the call via the stub assistant, whose transfer has a fallback if unanswered.
+    const t = (out as any).assistant.model.tools.find((x: any) => x.type === "transferCall");
+    expect(t.destinations[0].number).toBe(OWNER);
+    expect(t.destinations[0].transferPlan.fallbackPlan).toBeTruthy();
   });
 });
 

@@ -85,9 +85,12 @@ async function assistantRequest(deps: Deps, m: VapiMessage): Promise<Record<stri
   await deps.store.recordEvent(business.id, "call", callerOf(m), now);
   await deps.store.setFlag(`last-call-at:${business.id}`, now.toISOString());
   if (callsToday >= business.caps.callsPerDay) {
-    // Over the daily cap: the owner takes the call instead of the agent; with no owner phone, the agent only takes a message.
-    if (business.ownerPhone) return { destination: { type: "number", number: business.ownerPhone } };
-    return { assistant: buildStubAssistant(deps.env, business, { canTransfer: false, now }) };
+    // Over the daily cap: the owner takes the call instead of the agent, through the stub assistant so an
+    // unanswered transfer falls back to taking a message, and the call is recorded (an unanswered one gets a text-back).
+    if (m.call?.id) {
+      await deps.store.saveCall({ callId: m.call.id, businessId: business.id, caller: callerOf(m), startedAt: now.toISOString(), outcome: "unknown", disclosureVersion: DISCLOSURE_VERSION, disclosedAt: now.toISOString() });
+    }
+    return { assistant: buildStubAssistant(deps.env, business, { canTransfer: Boolean(business.ownerPhone), now }) };
   }
   if (m.call?.id) {
     await deps.store.saveCall({ callId: m.call.id, businessId: business.id, caller: callerOf(m), startedAt: now.toISOString(), outcome: "unknown", disclosureVersion: DISCLOSURE_VERSION, disclosedAt: now.toISOString() });
@@ -258,17 +261,19 @@ async function endOfCall(deps: Deps, m: VapiMessage): Promise<void> {
   const existing = await baseCall(deps, callId, business, caller);
   const userTurns = (m.artifact?.messages ?? []).filter((x) => x.role === "user").length;
   let outcome = existing.outcome;
+  let noTextWhy: string | undefined;
   if (outcome === "unknown" && /forwarded|transfer/i.test(m.endedReason ?? "") && !transferUnanswered(m.endedReason)) outcome = "transferred";
   if (needsTextBack(m.endedReason, userTurns, outcome)) {
-    await missedCallTextBack({ store: deps.store, notify: deps.notify, now: deps.now?.() }, business, caller, transferUnanswered(m.endedReason) ? `transfer to the owner was not answered (${m.endedReason})` : `call ended: ${m.endedReason}`, callId);
-    outcome = "text-back";
+    const r = await missedCallTextBack({ store: deps.store, notify: deps.notify, now: deps.now?.() }, business, caller, transferUnanswered(m.endedReason) ? `transfer to the owner was not answered (${m.endedReason})` : `call ended: ${m.endedReason}`, callId);
+    outcome = r.sent ? "text-back" : "missed";
+    if (!r.sent) noTextWhy = r.why;
   }
   await deps.store.saveCall({
     ...existing,
     endedAt: (deps.now?.() ?? new Date()).toISOString(),
     outcome,
     endedReason: m.endedReason,
-    summary: m.analysis?.summary,
+    summary: m.analysis?.summary ?? (noTextWhy ? `No text-back: ${noTextWhy}` : undefined),
     transcript: m.artifact?.transcript,
     recordingUrl: m.artifact?.recordingUrl,
     costUsd: typeof m.cost === "number" ? m.cost : undefined,

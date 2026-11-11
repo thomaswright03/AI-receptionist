@@ -26,12 +26,14 @@ export async function reconcileUnfinishedCalls(deps: { store: Store; notify: Not
   for (const call of await unfinishedCalls(deps.store, businesses, now)) {
     const business = businesses.find((b) => b.id === call.businessId);
     if (!business) continue;
-    let outcome = call.outcome;
     // Close the record before acting: if the process dies mid-way, a missed text is better than a double one.
-    await deps.store.saveCall({ ...call, endedAt: now.toISOString(), endedReason: "report-lost", outcome: call.outcome === "unknown" ? "text-back" : call.outcome });
-    if (outcome === "unknown") {
-      await missedCallTextBack({ store: deps.store, notify: deps.notify, now }, business, call.caller, "the call's final report never arrived", call.callId);
-      outcome = "text-back";
+    // "missed" until a text is confirmed sent.
+    const closed0 = { ...call, endedAt: now.toISOString(), endedReason: "report-lost", outcome: call.outcome === "unknown" ? ("missed" as const) : call.outcome };
+    await deps.store.saveCall(closed0);
+    if (call.outcome === "unknown") {
+      const r = await missedCallTextBack({ store: deps.store, notify: deps.notify, now }, business, call.caller, "the call's final report never arrived", call.callId);
+      if (r.sent) await deps.store.saveCall({ ...closed0, outcome: "text-back" });
+      else await deps.store.saveCall({ ...closed0, summary: `No text-back: ${r.why}` });
     }
     closed++;
   }

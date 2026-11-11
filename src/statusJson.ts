@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { ALERT_FAILED_KEY } from "./alerts.js";
+import { ALERT_FAILED_KEY, ALERT_OK_KEY } from "./alerts.js";
 import { sendKey } from "./notify.js";
 import { agentPaused } from "./safety/killswitch.js";
 import { callFailed, JOBS, jobState, plainStatus, type JobName } from "./status.js";
@@ -60,9 +60,14 @@ export async function buildStatus(deps: Deps, cfgMissing: string[], now: Date) {
     fn("basic", "Version", "ok", deps.env.APP_VERSION ?? "unknown", { checked: false }),
     fn("basic", "Mode", "ok", `agent=${deps.env.AGENT_MODE}, dryRun=${deps.env.DRY_RUN !== "false"}`, { checked: false }),
   ];
-  const overall = functions.filter((f) => f.tier === "important" && f.status !== "unknown").reduce<St>((w, f) => (f.status === "down" || (f.status === "warning" && w === "ok") ? f.status : w), "ok");
+  const overall = functions.filter((f) => f.tier === "important").reduce<St>((w, f) => {
+    if (w === "down" || f.status === "ok") return w;
+    if (f.status === "down") return "down";
+    if (f.status === "warning") return "warning";
+    return w === "ok" ? "unknown" : w; // an unchecked Important row keeps overall from reading OK
+  }, "ok");
   const latestUpdate = await readFile(new URL("../docs/latest-update.md", import.meta.url), "utf8").catch(() => null);
-  return { overall, checked_at: iso, functions, businesses, latestUpdate };
+  return { product: "AI Receptionist", overall, checked_at: iso, functions, businesses, latestUpdate };
 }
 
 type Fn = (tier: Tier, name: string, status: St, detail: string, o?: Opts) => Record<string, unknown> & { status: St };
@@ -91,9 +96,13 @@ async function callRows(deps: Deps, fn: Fn, now: Date, week: Date) {
   const open = (await unfinishedCalls(deps.store, deps.businesses, now)).length;
   const unfinished = fn("important", "Unfinished calls", open ? "warning" : "ok", open ? `${open} calls started over 20 minutes ago have no end-of-call report (the reconcile job will close them)` : "no calls are waiting for a final report");
   const alertFail = await deps.store.getFlag(ALERT_FAILED_KEY);
-  const alerts = alertFail
-    ? fn("important", "Owner alerts", "down", `the last time neither text nor email reached the owner: ${alertFail}`)
-    : fn("important", "Owner alerts", "ok", "no failed owner alerts since the service started", { checked: false });
+  const alertOk = await deps.store.getFlag(ALERT_OK_KEY);
+  const failedAt = alertFail?.split(" ")[0] ?? "";
+  const alerts = alertFail && (!alertOk || failedAt > alertOk)
+    ? fn("important", "Owner alerts", "down", `the last time neither text nor email reached the owner: ${alertFail}`, { lastSuccess: alertOk ?? null })
+    : alertOk
+      ? fn("important", "Owner alerts", "ok", `last owner alert delivered ${alertOk}`, { lastSuccess: alertOk })
+      : fn("important", "Owner alerts", "unknown", "no real owner alert has been sent yet", { checked: false });
   return [answered, delivered, unfinished, alerts];
 }
 

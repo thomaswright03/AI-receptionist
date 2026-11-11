@@ -59,7 +59,7 @@ function missedTwiml(): string {
 export async function dialResult(deps: Deps, p: Params): Promise<string> {
   const business = businessForNumber(deps.businesses, p.To);
   if (p.DialCallStatus === "completed" || !business) return twiml("<Hangup/>");
-  await missedCallTextBack({ store: deps.store, notify: deps.notify, now: deps.now?.() }, business, p.From ?? "", `owner did not answer (${p.DialCallStatus})`);
+  await missedOnTwilio(deps, business, p, `owner did not answer (${p.DialCallStatus})`);
   return missedTwiml();
 }
 
@@ -68,7 +68,24 @@ export async function status(deps: Deps, p: Params): Promise<void> {
   if (!["busy", "no-answer", "failed"].includes(p.CallStatus ?? "")) return;
   const business = businessForNumber(deps.businesses, p.To);
   if (!business) return;
-  await missedCallTextBack({ store: deps.store, notify: deps.notify, now: deps.now?.() }, business, p.From ?? "", `call ${p.CallStatus}`);
+  await missedOnTwilio(deps, business, p, `call ${p.CallStatus}`);
+}
+
+/** Text the caller back and record the call, so missed calls count in the owner's numbers. */
+async function missedOnTwilio(deps: Deps, business: Business, p: Params, reason: string): Promise<void> {
+  const now = deps.now?.() ?? new Date();
+  const caller = p.From ?? "";
+  const callId = p.CallSid ?? `twilio-${business.id}-${now.getTime()}`;
+  const prior = await deps.store.getCall(callId);
+  if (prior?.endedAt && prior.outcome !== "unknown") return; // already recorded by the other callback
+  const r = await missedCallTextBack({ store: deps.store, notify: deps.notify, now }, business, caller, reason, callId);
+  await deps.store.saveCall({
+    ...(prior ?? { callId, businessId: business.id, caller, startedAt: now.toISOString() }),
+    endedAt: now.toISOString(),
+    endedReason: reason,
+    outcome: r.sent ? "text-back" : "missed",
+    summary: r.sent ? undefined : `No text-back: ${r.why}`,
+  });
 }
 
 /**
@@ -84,7 +101,7 @@ export async function sms(deps: Deps, p: Params): Promise<string> {
     const reply = await ownerCommand(deps, business, body);
     if (reply) return twiml(`<Message>${xml(reply)}</Message>`);
     // The owner texting STOP must not opt their own number out: that would block every alert to them.
-    if (/^\s*(stop|stopall|unsubscribe|cancel|end|quit)\s*$/i.test(body)) {
+    if (/^\s*(stop|stopall|unsubscribe|cancel|end|quit|revoke|optout|opt[- ]out)\s*$/i.test(body)) {
       return twiml("<Message>STOP is for callers, so it was ignored and your alerts keep coming. To send calls to your cell instead of the receptionist, text PAUSE. Text HELP for the list.</Message>");
     }
   }

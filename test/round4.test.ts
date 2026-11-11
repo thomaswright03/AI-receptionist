@@ -220,3 +220,36 @@ describe("11: Mountain High", () => {
     expect((await deps.store.getCall("m1"))?.businessId).toBe("mountain-high");
   });
 });
+
+describe("round 5", () => {
+  it("lost report with a hidden number is recorded as missed, not text-back", async () => {
+    const { deps, store } = make();
+    const start = new Date(TUE_10AM.getTime() - 60 * 60_000);
+    await store.saveCall({ callId: "c1", businessId: deps.businesses[0]!.id, caller: "anonymous", startedAt: start.toISOString(), outcome: "unknown" });
+    await reconcileUnfinishedCalls({ store, notify: deps.notify, now: () => TUE_10AM }, deps.businesses);
+    expect((await store.getCall("c1"))!.outcome).toBe("missed");
+  });
+  it("twilio no-answer is recorded as a call", async () => {
+    const { deps, store } = make();
+    const app = createApp(deps);
+    await app.request("/twilio/dial-result", form({ To: NUMBER, From: CALLER, CallSid: "CA1", DialCallStatus: "no-answer" }));
+    const o = await store.outcomesSince(deps.businesses[0]!.id, new Date(TUE_10AM.getTime() - 86_400_000));
+    expect((o["missed"] ?? 0) + (o["text-back"] ?? 0)).toBe(1);
+  });
+  it("fresh store: Owner alerts unknown and overall not ok", async () => {
+    const { deps } = make();
+    const { buildStatus } = await import("../src/statusJson.js");
+    const s: any = await buildStatus(deps, [], TUE_10AM);
+    expect(s.functions.find((f: any) => f.name === "Owner alerts").status).toBe("unknown");
+    expect(s.overall).not.toBe("ok");
+    expect(s.product).toBeTruthy();
+  });
+  it("over-cap call uses an assistant with a transfer fallback and records the call", async () => {
+    const { deps, store } = make();
+    const biz = deps.businesses[0]!;
+    for (let i = 0; i < biz.caps.callsPerDay; i++) await store.recordEvent(biz.id, "call", CALLER, TUE_10AM);
+    const r: any = await handleVapi(deps, { message: { type: "assistant-request", call: { id: "cap1", customer: { number: CALLER }, phoneNumber: { number: NUMBER } } } } as any);
+    expect(r.assistant).toBeTruthy();
+    expect(await store.getCall("cap1")).toBeTruthy();
+  });
+});

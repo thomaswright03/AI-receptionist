@@ -1,10 +1,11 @@
 import type { Business } from "./config/types.js";
 import type { Notifier } from "./notify.js";
 import type { Store } from "./store.js";
-import { VOLATILE } from "./store.js";
 
 /** Set when neither SMS nor email reached the owner; shown on the status endpoint. */
-export const ALERT_FAILED_KEY = `${VOLATILE}owner-alert:failed`;
+export const ALERT_FAILED_KEY = "owner-alert:failed";
+/** Time of the last owner alert that really reached them (not a dry run). Persisted. */
+export const ALERT_OK_KEY = "owner-alert:ok";
 
 /**
  * Tells the owner by text, or by email when there is no owner phone or the text fails.
@@ -19,9 +20,16 @@ export async function alertOwner(
   via: "sms" | "email" = "sms",
 ): Promise<boolean> {
   const from = business.inboundNumbers[0];
-  if (via === "sms" && from && business.ownerPhone && (await deps.notify.sms(business.ownerPhone, from, text)).ok) return true;
+  const reached = async (dryRun: boolean) => {
+    if (!dryRun) await deps.store.setFlag(ALERT_OK_KEY, (deps.now?.() ?? new Date()).toISOString()).catch(() => undefined);
+    return true;
+  };
+  if (via === "sms" && from && business.ownerPhone) {
+    const s = await deps.notify.sms(business.ownerPhone, from, text);
+    if (s.ok) return reached(Boolean(s.dryRun));
+  }
   const r = await deps.notify.email(business.ownerEmail, subject, text);
-  if (r.ok) return true;
+  if (r.ok) return reached(Boolean(r.dryRun));
   console.error(JSON.stringify({ event: "owner-alert.failed", subject, error: r.error }));
   await deps.store.setFlag(ALERT_FAILED_KEY, `${(deps.now?.() ?? new Date()).toISOString()} ${subject}`).catch(() => undefined);
   return false;

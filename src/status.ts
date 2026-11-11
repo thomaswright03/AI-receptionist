@@ -44,6 +44,7 @@ const OUTCOME_WORDS: Record<string, string> = {
   transferred: "passed to a person",
   message: "left a message",
   "text-back": "missed, texted back",
+  missed: "missed, no text sent",
   unknown: "no clear result",
   messages: "messages taken",
   texts: "texts sent",

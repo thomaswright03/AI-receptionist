@@ -18,7 +18,7 @@ const EXPIRING_FLAGS = /^(booking:|booked-call:|last-call-at:)/;
 /** Flags starting with this are kept in memory only (heartbeats): they never touch the disk. */
 export const VOLATILE = "mem:";
 
-export type CallOutcome = "booked" | "transferred" | "message" | "text-back" | "unknown";
+export type CallOutcome = "booked" | "transferred" | "message" | "text-back" | "missed" | "unknown";
 
 export interface CallRecord {
   callId: string;
