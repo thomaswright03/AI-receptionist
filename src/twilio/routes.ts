@@ -52,7 +52,7 @@ function dialOwner(deps: Deps, business: Business): string {
 }
 
 function missedTwiml(): string {
-  return twiml("<Say>Sorry we missed you. We'll text you right away so we can help.</Say><Hangup/>");
+  return twiml("<Say>Sorry we missed you. We'll get back to you as soon as we can.</Say><Hangup/>");
 }
 
 /** After dialing the owner: if nobody picked up, text the caller back. */

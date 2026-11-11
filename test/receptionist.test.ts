@@ -439,7 +439,9 @@ describe("legal fixes", () => {
     const { mkdtempSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const file = `${mkdtempSync(`${tmpdir()}/oo-`)}/state.json`;
-    await memoryStore(file).setOptOut(CALLER, true);
+    const w = memoryStore(file);
+    await w.setOptOut(CALLER, true);
+    await w.flush();
     expect(await memoryStore(file).isOptedOut(CALLER)).toBe(true);
   });
 
@@ -447,6 +449,7 @@ describe("legal fixes", () => {
     const st = memoryStore("/nonexistent-dir/definitely/state.json");
     await st.recordEvent("wright-ai", "text", CALLER, TUESDAY_10AM);
     await st.setFlag("a", "b");
+    await st.flush();
     expect(await st.getFlag("a")).toBe("b");
     expect(st.lastPersistError).toContain("ENOENT");
     const { assertWritable } = await import("../src/store.js");
@@ -558,6 +561,7 @@ describe("fix round 1", () => {
     await a.setFlag("paused:wright-ai", "now");
     await a.saveCall({ callId: "c9", businessId: "wright-ai", caller: CALLER, startedAt: "2026-11-10T17:00:00Z", outcome: "message" });
     await a.recordEvent("wright-ai", "text", CALLER, TUESDAY_10AM);
+    await a.flush();
     const b = memoryStore(file);
     expect(await b.getFlag("paused:wright-ai")).toBe("now");
     expect((await b.getCall("c9"))?.outcome).toBe("message");
@@ -603,15 +607,162 @@ describe("fix round 1", () => {
     expect((await app.request("/admin/status.json")).status).toBe(401);
     const res = await app.request("/admin/status.json", { headers: { Authorization: "Bearer s3cret" } });
     const j = (await res.json()) as any;
-    expect(j.basic.find((f: any) => f.name === "Version").detail).toBe("abc123");
-    expect(j.status).toBeDefined();
-    expect(j.important[0].last_checked).toBeDefined();
-    expect(j.key.find((f: any) => f.name === "Watchdog").status).toBe("unknown");
+    const row = (n: string) => j.functions.find((f: any) => f.name === n);
+    expect(row("Version").detail).toBe("abc123");
+    expect(row("Version").tier).toBe("basic");
+    expect(row("Version").last_checked).toBeNull();
+    expect(j.overall).toBeDefined();
+    expect(j.checked_at).toBeDefined();
+    expect(row("Watchdog").status).toBe("unknown");
+    for (const n of ["Calls answered", "Messages delivered"]) expect(row(n).tier).toBe("important");
+    for (const n of ["Queued text-back job", "Weekly summary job", "Retention sweep"]) expect(row(n).tier).toBe("key");
     expect(j.latestUpdate).toContain("Latest Update");
   });
 
   it("/health fails when live config is missing", async () => {
     const { deps } = setup({ env: { DRY_RUN: "false" } });
     expect((await createApp(deps).request("/health")).status).toBe(503);
+  });
+});
+
+describe("fix round 3", () => {
+  const post = (app: ReturnType<typeof createApp>, path: string, form: Record<string, string>) =>
+    app.request(path, { method: "POST", body: new URLSearchParams(form), headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+  const tmpFile = async (name: string) => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    return `${mkdtempSync(`${tmpdir()}/${name}-`)}/state.json`;
+  };
+
+  it("the missed-call line promises nothing about a text", async () => {
+    const { deps } = setup({ env: { OWNER_PHONE_WRIGHT_AI: "" } });
+    deps.businesses[0]!.ownerPhone = undefined as never;
+    deps.env.KILL_SWITCH = "on";
+    const res = await post(createApp(deps), "/twilio/voice", { To: NUMBER, From: CALLER });
+    const xml = await res.text();
+    expect(xml).toContain("We'll get back to you as soon as we can");
+    expect(xml).not.toMatch(/text you/i);
+  });
+
+  it("a failed booking emails the owner when there is no owner phone", async () => {
+    const route: Route = (url) => (url.includes("/v2/bookings") ? new Response("{}", { status: 400 }) : undefined);
+    const { deps, sent } = setup({ routes: [route], env: { CAL_API_KEY: "k" } });
+    deps.businesses[0]!.ownerPhone = undefined as never;
+    const r = (await handleVapi(deps, { message: { type: "tool-calls", call, toolCallList: [{ id: "t", function: { name: "book_discovery_call", arguments: { start: "2026-11-11T21:00:00.000Z", name: "Dana", email: "d@x.com", need: "site" } } }] } })) as any;
+    expect(r.results[0].result).toContain("call back");
+    expect(sent.some((s) => s.channel === "email" && s.subject?.includes("Booking FAILED"))).toBe(true);
+    expect(sent.some((s) => s.channel === "sms")).toBe(false);
+  });
+
+  it("a failing job shows as Down with its error, and a success is recorded only after it finishes", async () => {
+    const { runJob } = await import("../src/status.js");
+    const { deps, store } = setup({ env: { ADMIN_SECRET: "s" } });
+    let finished = false;
+    await runJob(store, "textback", async () => { expect(await store.getFlag("mem:job:textback:ok")).toBeUndefined(); finished = true; }, () => TUESDAY_10AM);
+    expect(finished).toBe(true);
+    expect(await store.getFlag("mem:job:textback:ok")).toBe(TUESDAY_10AM.toISOString());
+    await runJob(store, "textback", async () => { throw new Error("boom"); }, () => TUESDAY_10AM);
+    deps.fetch = fakeFetch([slots]);
+    const j = (await (await createApp(deps).request("/admin/status.json", { headers: { Authorization: "Bearer s" } })).json()) as any;
+    const row = j.functions.find((f: any) => f.name === "Queued text-back job");
+    expect(row.status).toBe("down");
+    expect(row.detail).toContain("boom");
+  });
+
+  it("sends the weekly summary once per local Monday, even after UTC rolls to Tuesday", async () => {
+    const { sendWeeklySummaries } = await import("../src/summary.js");
+    const { deps, sent, store } = setup();
+    const at = (iso: string) => ({ ...deps, store, now: () => new Date(iso) });
+    const monday10am = "2026-11-09T17:00:00Z"; // Monday 10:00 Phoenix
+    const monday6pm = "2026-11-10T01:00:00Z"; // Monday 18:00 Phoenix, already Tuesday in UTC
+    expect(await sendWeeklySummaries(at(monday10am), deps.businesses)).toBe(1);
+    expect(await sendWeeklySummaries(at(monday6pm), deps.businesses)).toBe(0);
+    expect(await sendWeeklySummaries(at("2026-11-10T17:00:00Z"), deps.businesses)).toBe(0); // Tuesday
+    expect(sent.filter((s) => s.subject?.startsWith("Weekly"))).toHaveLength(1);
+    expect(sent[0]!.body).toContain("No calls this week.");
+    expect(await sendWeeklySummaries(at("2026-11-16T17:00:00Z"), deps.businesses)).toBe(1); // next Monday
+  });
+
+  it("the weekly summary lists outcomes in plain words", async () => {
+    const { sendWeeklySummaries } = await import("../src/summary.js");
+    const { deps, sent, store } = setup();
+    await store.saveCall({ callId: "w1", businessId: "wright-ai", caller: CALLER, startedAt: "2026-11-05T17:00:00Z", outcome: "booked" });
+    await sendWeeklySummaries({ ...deps, store, now: () => new Date("2026-11-09T17:00:00Z") }, deps.businesses);
+    expect(sent[0]!.body).toContain("1 booked a call");
+    expect(sent[0]!.body).toContain("Text-backs waiting");
+  });
+
+  it("STATUS by text answers in plain words with queued text-backs, today's calls and problems", async () => {
+    const { deps, store } = setup({ env: { ADMIN_SECRET: "s" } });
+    const app = createApp(deps);
+    await store.saveCall({ callId: "s1", businessId: "wright-ai", caller: CALLER, startedAt: TUESDAY_10AM.toISOString(), outcome: "message", message: { name: "A", callback: CALLER, text: "hi", urgent: false, delivered: "none", at: TUESDAY_10AM.toISOString() } });
+    await store.setFlag("deferred-textback:wright-ai|+14805550111", JSON.stringify({ at: TUESDAY_10AM.toISOString(), reason: "x" }));
+    const res = await post(app, "/twilio/sms", { To: NUMBER, From: OWNER, Body: "STATUS" });
+    const text = await res.text();
+    expect(text).toContain("Calls go to the AI receptionist");
+    expect(text).toContain("1 left a message");
+    expect(text).toContain("waiting for morning: 1");
+    expect(text).toContain("could not be sent to you");
+  });
+
+  it("the retention sweep also removes old booking keys and last-call flags, and keeps the rest", async () => {
+    const st = memoryStore();
+    await st.setFlag("booking:x:c:1:a@b.com", "booked:u");
+    await st.setFlag("booked-call:c", "u");
+    await st.setFlag("last-call-at:wright-ai", "t");
+    await st.setFlag("paused:wright-ai", "now");
+    expect(await st.sweep(new Date(Date.now() - 1000))).toBe(0);
+    expect(await st.sweep(new Date(Date.now() + 1000))).toBe(3);
+    expect(await st.getFlag("paused:wright-ai")).toBe("now");
+    expect(await st.getFlag("booking:x:c:1:a@b.com")).toBeUndefined();
+  });
+
+  it("heartbeat flags never write the file, and transcripts stay out of the state file", async () => {
+    const { readFileSync, existsSync } = await import("node:fs");
+    const file = await tmpFile("hb");
+    const st = memoryStore(file);
+    await st.setFlag("mem:job:x:ok", "now");
+    await st.flush();
+    expect(existsSync(file)).toBe(false);
+    await st.saveCall({ callId: "c-1", businessId: "wright-ai", caller: CALLER, startedAt: TUESDAY_10AM.toISOString(), outcome: "unknown", transcript: "SECRET WORDS" });
+    await st.flush();
+    expect(readFileSync(file, "utf8")).not.toContain("SECRET WORDS");
+    expect((await st.getCall("c-1"))?.transcript).toBe("SECRET WORDS");
+    expect(JSON.stringify(await st.exportNumber(CALLER))).toContain("SECRET WORDS");
+    expect(await memoryStore(file).getCall("c-1")).toMatchObject({ transcript: "SECRET WORDS" });
+    await st.deleteNumber(CALLER);
+    await st.flush();
+    expect((await memoryStore(file).getCall("c-1"))).toBeUndefined();
+  });
+
+  it("many changes in a burst cause one write", async () => {
+    const file = await tmpFile("burst");
+    const st = memoryStore(file);
+    for (let i = 0; i < 50; i++) await st.setFlag(`k${i}`, "v");
+    expect((await import("node:fs")).existsSync(file)).toBe(false); // not yet: written in the background
+    await st.flush();
+    expect(await memoryStore(file).getFlag("k49")).toBe("v");
+  });
+
+  it("real sends map Twilio and Resend failures and timeouts to errors", async () => {
+    const { notifier } = await import("../src/notify.js");
+    const env = loadEnv({ DRY_RUN: "false", TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "t", RESEND_API_KEY: "r" });
+    const bad = notifier(env, (async () => new Response("no", { status: 429 })) as typeof fetch);
+    expect(await bad.sms("+1", "+2", "x")).toMatchObject({ ok: false, error: "Twilio 429" });
+    expect(await bad.email("a@b.com", "s", "b")).toMatchObject({ ok: false, error: "Resend 429" });
+    const slow = notifier(env, (async () => { throw new DOMException("timed out", "TimeoutError"); }) as typeof fetch);
+    expect((await slow.sms("+1", "+2", "x")).ok).toBe(false);
+    expect((await slow.email("a@b.com", "s", "b")).error).toContain("timed out");
+    const good = notifier(env, (async () => new Response("{}", { status: 201 })) as typeof fetch);
+    expect((await good.sms("+1", "+2", "x")).ok).toBe(true);
+    expect((await notifier(loadEnv({ DRY_RUN: "false" })).sms("+1", "+2", "x")).error).toBe("Twilio not configured");
+  });
+
+  it("call summary emails use plain words", async () => {
+    const { deps, sent } = setup();
+    await handleVapi(deps, { message: { type: "end-of-call-report", call, endedReason: "customer-ended-call", artifact: { messages: [{ role: "user" }, { role: "user" }, { role: "user" }] } } });
+    const mail = sent.find((s) => s.channel === "email")!;
+    expect(mail.body).toContain("the caller hung up");
+    expect(mail.body).not.toContain("customer-ended-call");
   });
 });

@@ -1,21 +1,35 @@
 import type { Business } from "./config/types.js";
 import type { Notifier } from "./notify.js";
+import { agentPaused } from "./safety/killswitch.js";
+import { outcomeLines, plainStatus } from "./status.js";
+import type { Env } from "./config/env.js";
 import type { Store } from "./store.js";
+import type { Watchdog } from "./safety/watchdog.js";
 
-/** Emails each owner a weekly outcome summary, once per ISO-ish week (Monday 8am+ local). Safe to call hourly. */
-export async function sendWeeklySummaries(deps: { store: Store; notify: Notifier; now?: () => Date }, businesses: Business[]): Promise<number> {
+/** The business's local calendar date (YYYY-MM-DD), hour and weekday, from a UTC instant. */
+export function localParts(now: Date, timeZone: string): { date: string; hour: number; weekday: string } {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", weekday: "short" }).formatToParts(now).map((x) => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, hour: Number(p.hour), weekday: String(p.weekday) };
+}
+
+/**
+ * Emails each owner a weekly summary, once per local week (Monday 8am+ in the business's zone).
+ * The once-only key is the local Monday's date, so the UTC rollover at 5pm Phoenix time can't cause a repeat.
+ * Safe to call hourly.
+ */
+export async function sendWeeklySummaries(deps: { env?: Env; store: Store; notify: Notifier; watchdog?: Watchdog; now?: () => Date }, businesses: Business[]): Promise<number> {
   const now = deps.now?.() ?? new Date();
   let sent = 0;
   for (const b of businesses) {
-    const local = new Date(now.toLocaleString("en-US", { timeZone: b.timeZone }));
-    if (local.getDay() !== 1 || local.getHours() < 8 || !b.ownerEmail) continue;
+    const local = localParts(now, b.timeZone);
+    if (local.weekday !== "Mon" || local.hour < 8 || !b.ownerEmail) continue;
     const key = `weekly-summary:${b.id}`;
-    const week = now.toISOString().slice(0, 10);
-    if ((await deps.store.getFlag(key)) === week) continue;
-    const o = await deps.store.outcomesSince(b.id, new Date(now.getTime() - 7 * 86_400_000));
-    const lines = Object.entries(o).map(([k, v]) => `${k}: ${v}`);
-    const r = await deps.notify.email(b.ownerEmail, `Weekly receptionist summary (${b.id})`, lines.length ? lines.join("\n") : "No calls this week.");
-    if (r.ok) { await deps.store.setFlag(key, week); sent++; }
+    if ((await deps.store.getFlag(key)) === local.date) continue;
+    const week = outcomeLines(await deps.store.outcomesSince(b.id, new Date(now.getTime() - 7 * 86_400_000)));
+    const paused = deps.env ? await agentPaused({ ...deps, env: deps.env }, b).catch((err: unknown) => ({ paused: true, why: String(err) })) : { paused: false, why: "running" };
+    const body = [week.length ? `Last 7 days: ${week.join(", ")}.` : "No calls this week.", await plainStatus(deps, b, paused, now)].join("\n\n");
+    const r = await deps.notify.email(b.ownerEmail, `Weekly receptionist summary (${b.id})`, body);
+    if (r.ok) { await deps.store.setFlag(key, local.date); sent++; }
   }
   return sent;
 }

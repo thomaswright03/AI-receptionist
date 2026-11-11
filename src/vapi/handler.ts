@@ -7,6 +7,7 @@ import { withinHours } from "../safety/hours.js";
 import type { Store } from "../store.js";
 import type { Watchdog } from "../safety/watchdog.js";
 import { missedCallTextBack, sendCallerSms } from "../textBack.js";
+import { endedWords, outcomeWords } from "../status.js";
 import { DISCLOSURE_VERSION } from "./assistant.js";
 import { bookCall, openTimes } from "../tools/calcom.js";
 import { buildAssistant, buildStubAssistant, spokenTime } from "./assistant.js";
@@ -116,8 +117,7 @@ async function toolCalls(deps: Deps, m: VapiMessage): Promise<Record<string, unk
         result = await runTool(deps, business, m, call.function?.name ?? "", args);
       } catch (err) {
         console.error(JSON.stringify({ event: "tool.error", tool: call.function?.name, callId: m.call?.id, err: String(err) }));
-        const from = business.inboundNumbers[0];
-        if (from && business.ownerPhone) await deps.notify.sms(business.ownerPhone, from, `The receptionist hit an error during a call from ${callerOf(m)} (${call.function?.name}). Please check on them.`).catch(() => undefined);
+        await alertOwner(deps, business, "Receptionist error during a call", `The receptionist hit an error during a call from ${callerOf(m)} (${call.function?.name}). Please check on them.`).catch(() => undefined);
       }
     }
     results.push({ toolCallId: call.id, result: JSON.stringify(result) });
@@ -152,7 +152,7 @@ async function runTool(
       return { booked: true, say: "This call already has a booking. Confirm it with the caller; don't book again." };
     }
     if (prior === "pending" || prior === "uncertain") {
-      return { booked: false, say: "Say the owner will confirm the time by text shortly. Do not say it is booked." };
+      return { booked: false, say: `Say the owner will confirm the time ${business.ownerPhone ? "by text" : "by email"} shortly. Do not say it is booked.` };
     }
     await deps.store.setFlag(key, "pending");
     const result = await bookCall(
@@ -186,15 +186,11 @@ async function runTool(
     }
     if (result.reason === "uncertain") {
       await deps.store.setFlag(key, "uncertain");
-      if (from && business.ownerPhone) {
-        await deps.notify.sms(business.ownerPhone, from, `CHECK CAL.COM: booking for ${who} (${caller}, ${email}) at ${when} may or may not have gone through. Need: ${need}`);
-      }
-      return { booked: false, say: "Say the owner will confirm the time by text shortly. Do not say it is booked." };
+      await alertOwner(deps, business, `CHECK CAL.COM: booking for ${who}`, `CHECK CAL.COM: booking for ${who} (${caller}, ${email}) at ${when} may or may not have gone through. Need: ${need}`);
+      return { booked: false, say: `Say the owner will confirm the time ${business.ownerPhone ? "by text" : "by email"} shortly. Do not say it is booked.` };
     }
     await deps.store.setFlag(key, undefined);
-    if (from && business.ownerPhone) {
-      await deps.notify.sms(business.ownerPhone, from, `Booking FAILED for ${who} (${caller}, ${email}) at ${when}. Please call them back. Need: ${need}`);
-    }
+    await alertOwner(deps, business, `Booking FAILED for ${who}`, `Booking FAILED for ${who} (${caller}, ${email}) at ${when}. Please call them back. Need: ${need}`);
     return { booked: false, say: "Booking failed. Take a message instead and say the owner will call back to set a time." };
   }
   if (name === "take_message") {
@@ -222,6 +218,14 @@ async function runTool(
     return { ok: true, say: delivered === "none" ? "Message taken. Tell them the owner will call them back, today if possible." : "Message passed on. Tell them the owner will call them back, today if possible." };
   }
   return { ok: false, say: "Unknown tool." };
+}
+
+/** Alerts the owner by text, or by email when there is no owner phone or the text fails. */
+async function alertOwner(deps: Deps, business: Business, subject: string, text: string): Promise<void> {
+  const from = business.inboundNumbers[0];
+  if (from && business.ownerPhone && (await deps.notify.sms(business.ownerPhone, from, text)).ok) return;
+  const r = await deps.notify.email(business.ownerEmail, subject, text);
+  if (!r.ok) console.error(JSON.stringify({ event: "owner-alert.failed", subject, error: r.error }));
 }
 
 async function baseCall(deps: Deps, callId: string, business: Business, caller: string) {
@@ -270,13 +274,13 @@ async function endOfCall(deps: Deps, m: VapiMessage): Promise<void> {
   });
   // The owner can always see what happened: one short email per call.
   const lines = [
-    `Outcome: ${outcome}`,
+    `Result: ${outcomeWords(outcome)}`,
     `Caller: ${caller}`,
-    `Ended: ${m.endedReason ?? "unknown"}`,
+    `How it ended: ${endedWords(m.endedReason)}`,
     `Summary: ${m.analysis?.summary ?? "(none)"}`,
     ...(existing.message ? [`Message left: ${existing.message.name}, ${existing.message.callback}: ${existing.message.text}`] : []),
     ...(m.artifact?.recordingUrl ? [`Recording: ${m.artifact.recordingUrl}`] : []),
   ];
-  const sent = await deps.notify.email(business.ownerEmail, `Call summary: ${caller} (${outcome})`, lines.join("\n"));
+  const sent = await deps.notify.email(business.ownerEmail, `Call summary: ${caller} (${outcomeWords(outcome)})`, lines.join("\n"));
   if (!sent.ok) console.error(JSON.stringify({ event: "call-summary.email-failed", callId, error: sent.error }));
 }

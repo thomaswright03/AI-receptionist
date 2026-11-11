@@ -1,6 +1,7 @@
 import type { Env } from "../config/env.js";
 import type { Business } from "../config/types.js";
 import type { Store } from "../store.js";
+import { plainStatus } from "../status.js";
 import type { Watchdog } from "./watchdog.js";
 
 // Where does a NEW call go: the agent, or the owner's phone?
@@ -61,8 +62,7 @@ export async function ownerCommand(
       : "Resumed, callers now reach the AI receptionist. Reply PAUSE to undo.";
   }
   if (word === "STATUS") {
-    const state = await agentPaused(deps, business);
-    return state.paused ? `Calls ring your cell: ${state.why}.` : "Calls go to the AI receptionist.";
+    return plainStatus(deps, business, await agentPaused(deps, business), deps.now?.() ?? new Date());
   }
   return undefined;
 }

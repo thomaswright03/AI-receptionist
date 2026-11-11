@@ -20,7 +20,6 @@ const schema = z.object({
   STATE_FILE: z.string().optional(),
   /** Version shown in /admin/status.json (set to the commit at deploy). */
   APP_VERSION: z.string().default("dev"),
-  /** File that keeps opt-outs across restarts (put it on a Fly volume). Empty = memory only. */
   /** Bearer token for /admin/export and /admin/delete (by phone number). Routes are off when unset. */
   ADMIN_SECRET: z.string().optional(),
   CAL_API_KEY: z.string().optional(),

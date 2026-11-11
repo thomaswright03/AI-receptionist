@@ -4,6 +4,7 @@ import { loadBusinesses } from "./config/businesses.js";
 import { loadEnv } from "./config/env.js";
 import { notifier } from "./notify.js";
 import { assertWritable, memoryStore, RETENTION_DAYS } from "./store.js";
+import { JOBS, runJob, type JobName } from "./status.js";
 import { sendWeeklySummaries } from "./summary.js";
 import { flushDeferredTextBacks } from "./textBack.js";
 import { Watchdog, watchdogTick } from "./safety/watchdog.js";
@@ -40,18 +41,20 @@ if (watchUrls.length) {
   }, 60_000);
 }
 
-setInterval(() => {
-  sendWeeklySummaries({ store, notify }, businesses).catch((err) => console.error(JSON.stringify({ event: "weekly.error", err: String(err) })));
-}, 3_600_000);
+// Each job records a success only after it finished, or its error, for the status page and STATUS text.
+const jobs: [JobName, number, () => Promise<unknown>][] = [
+  ["weekly", JOBS.weekly.everyMs, () => sendWeeklySummaries({ env, store, notify, watchdog }, businesses)],
+  ["sweep", JOBS.sweep.everyMs, () => store.sweep(new Date(Date.now() - RETENTION_DAYS * 86_400_000))],
+  ["textback", JOBS.textback.everyMs, () => flushDeferredTextBacks({ store, notify }, businesses)],
+];
+for (const [name, every, run] of jobs) {
+  void runJob(store, name, run);
+  setInterval(() => void runJob(store, name, run), every);
+}
 
-setInterval(() => {
-  store.sweep(new Date(Date.now() - RETENTION_DAYS * 86_400_000)).catch((err) => console.error(JSON.stringify({ event: "sweep.error", err: String(err) })));
-}, 6 * 3_600_000);
-
-setInterval(() => {
-  store.setFlag("flush-last-run", new Date().toISOString()).catch(() => undefined);
-  flushDeferredTextBacks({ store, notify }, businesses).catch((err) => console.error(JSON.stringify({ event: "textback.flush.error", err: String(err) })));
-}, 60_000);
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.on(sig, () => void store.flush().finally(() => process.exit(0)));
+}
 
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
   console.log(JSON.stringify({ event: "listening", port: info.port, dryRun: env.DRY_RUN !== "false" }));

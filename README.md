@@ -72,6 +72,8 @@ State: a JSON file (`STATE_FILE`) on a persistent volume; swap in Postgres behin
 ```bash
 npm ci
 npm test          # vitest
+npm run lint      # strict typecheck (unused code is an error)
+npm run coverage  # tests with a coverage floor (CI enforces it)
 npm run typecheck
 npm run dev       # local server on :8080
 ```
@@ -90,7 +92,15 @@ QA call script: `docs/qa-cases.md`. Status and what's next: `STATE.md`.
 ## Legal
 Privacy notice: `docs/legal/privacy.md` (served at `/privacy`); terms: `docs/legal/terms.md` (`/terms`). Also in `docs/legal/`: applicable law, contracts register, vendors, messaging, claims, data inventory, breach plan.
 
-## Latest Update (2026-11-10, fix round 2)
+## Latest Update (2026-11-11, fix round 3)
+- No frontend changes in this round.
+- Callers who reach the missed-call message now hear "We'll get back to you as soon as we can" (no promise of a text). Booking and tool-error alerts fall back to email when there is no owner phone, and the agent says "by email" then.
+- Status: STATUS by text and the weekly email now say in plain words what happened in the last 24 hours, how many text-backs are waiting, and anything broken. `/admin/status.json` uses the standard shape (`overall`, `checked_at`, `functions[]` with `tier`), has a row per scheduled job (last success, next run, last error), and Important rows for "Calls answered" and "Messages delivered". A job is "ok" only after it finishes; a failing one shows Down with its error.
+- Weekly summary goes out once per local Monday (it used to repeat at 5pm Phoenix time).
+- State writes are now batched and run in the background; transcripts are kept in separate files; heartbeats never touch the disk. The retention sweep also removes booking keys and last-call times. Call summary emails use plain words.
+- CI runs `npm run lint` and a coverage floor.
+
+## Earlier update (2026-11-10, fix round 2)
 - No frontend changes (no web UI). `GET /admin/status.json` now uses Important/Key/Basic tiers with ok/warning/down/unknown per function plus last_checked/last_success/next_expected_run; Cal.com is checked against the real event's slots; the watchdog shows "unknown" when off; outcome counts (today, 7 days) per business.
 - A failed disk write no longer fails a call (logged, shown in status); startup checks the state directory; fly.toml mounts `/data`; render.yaml added; Dockerfile creates `/data`.
 - Weekly outcome email to the owner; 90-day retention sweep; call cost and duration stored from Vapi's report; a corrupt queued text-back is dropped instead of blocking the rest; deferred text-backs send the owner one SMS instead of two; redundant `OPTOUT_FILE` removed.
