@@ -1,21 +1,23 @@
 # STATE
 
-AI phone receptionist for small businesses (Hono/TypeScript). Twilio voice switch -> Vapi agent; FAQ, Cal.com booking, transfer, text-back for missed calls. Pilot: Wright AI's own line, then Mountain High Disposal after hours (that flow is not built). Not deployed; never run against real Vapi/Twilio/Cal.com.
+AI phone receptionist for small businesses (Hono/TypeScript). Twilio voice switch -> Vapi agent; FAQ, Cal.com booking, transfer (with fallback), text-back for missed calls. Pilot: Wright AI's own line, then Mountain High Disposal (flow added, placeholder content). Never run against real Vapi/Twilio/Cal.com.
 
-## Status (2026-11-11, excellence fix round 3)
-71 tests pass; `npm run lint`, `npm run coverage` (floor enforced in CI), `npm run build` pass.
-Round 3 fixed: neutral missed-call wording; owner alerts fall back to email (no owner phone); job heartbeats recorded only on success, errors shown Down; weekly summary keyed on local Monday; batched async state writes, transcripts in `<STATE_FILE>.transcripts/`, `mem:` flags never persisted; sweep removes booking/last-call flags; standard status JSON with job rows and Calls answered / Messages delivered rows; plain-language STATUS text and weekly email; plain labels in call emails; stale comments and `abandoned` outcome removed.
+## Status (2026-11-11, excellence fix round 4)
+90 tests pass; lint, coverage (95.6% lines), build, `npm run smoke` pass; CI runs smoke.
+Deployed in dry-run (stub agent, free Render, no disk): https://ai-receptionist-dryrun.onrender.com, service srv-dbptj0u7bikc73bcmm10. `/health` 200. Outside monitor: `.github/workflows/uptime.yml` (every 15 min, repo variable DEPLOY_URL).
+Round 4 fixed: transfer fallbackPlan + unanswered-transfer outcome; missed-call owner notice falls back to email and failure is recorded; reconcile job closes calls with no end-of-call report after 20 min; status rows (Twilio, Resend, Vapi, Kill switch, Latest backup, Owner alerts, Unfinished calls) in `src/statusJson.ts`; honest texting window, Hawaii/Alaska not queued, one owner SMS per queued text-back; owner HELP, owner STOP warning, `docs/owner-guide.md` (sent with first weekly summary); prompt "by email"/routine no-email; Mountain High flow/business (active when MOUNTAIN_HIGH_NUMBER set); `npm run eval` (not yet run: needs ANTHROPIC_API_KEY); APP_VERSION set at deploy; latest-update newest first.
 
 ## Decisions
 - State is a JSON file on a persistent volume (`STATE_FILE`); SQLite/Turso only if volume demands.
-- Urgent vs routine alerts: owner SMS if a phone exists, else email.
-- Kill switch: owner PAUSE/RESUME/STATUS by text, `KILL_SWITCH`, remote flag, watchdog (3 fail / 3 ok).
+- Urgent vs routine alerts: owner SMS if a phone exists, else email (alertOwner in src/alerts.ts).
+- Kill switch: owner PAUSE/RESUME/STATUS/HELP by text, `KILL_SWITCH`, remote flag, watchdog.
+- Lost end-of-call reports are treated as missed calls (no Vapi API fetch: no account).
 
 ## Next steps
-- Deploy in DRY_RUN with the stub agent (needs a paid host with a persistent disk: Thomas's approval), add an outside uptime monitor on `/health`, practise a snapshot restore and write it in the README.
-- Vapi/Twilio/ElevenLabs accounts, A2P 10DLC, live QA (docs/qa-cases.md), verify field names marked "verify".
-- FAQ/pricing approval, transfer hours, Cal.com phone-only event (`CAL_LINK_WRIGHT_AI`).
-- Mountain High roll-off flow; legal facts and agreement (see docs/legal/).
+- Paid persistent-disk host (Thomas approves), then a snapshot restore drill and a README entry.
+- Vapi/Twilio/ElevenLabs accounts, A2P 10DLC, live QA (docs/qa-cases.md); verify Vapi transferPlan field names and the transfer end-reason strings (row 17).
+- Run `npm run eval` with an Anthropic key; record results.
+- FAQ/pricing approval, transfer hours, Cal.com event; Mountain High facts; legal items.
 
 ## Open problems
-- Nothing verified live; scheduler wiring in `src/server.ts` is not unit tested (excluded from coverage).
+- Nothing verified live. Free Render host sleeps when idle and has no disk, so state is lost on restart.
