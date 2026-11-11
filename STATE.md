@@ -21,3 +21,11 @@ Round 4 fixed: transfer fallbackPlan + unanswered-transfer outcome; missed-call 
 
 ## Open problems
 - Nothing verified live. Free Render host sleeps when idle and has no disk, so state is lost on restart.
+
+## Round 5 (fix of grade 71)
+- Outcomes: `text-back` only when a text was sent; otherwise new `missed` outcome with the reason in the summary (reconcile, Vapi end-of-call, Twilio).
+- Twilio dial-result/status paths now save call records. Over-cap calls use the stub assistant (transfer with fallbackPlan) and are recorded.
+- Status: Owner alerts row from persisted last-success/failure (Unknown until a real alert); overall counts Unknown Important rows; `product` field added.
+- Uptime: 90 s timeout; a scheduled run was green on 2026-11-11 (DEPLOY_URL is set). Failure email goes to the repo owner.
+- Vapi transferPlan: mode now `warm-transfer-experimental` (fallbackPlan applies to it per the API reference); live check still pending an account.
+- Eval NOT run: no Anthropic key in the session. Run `npm run eval` with ANTHROPIC_API_KEY and commit docs/eval-results/.
