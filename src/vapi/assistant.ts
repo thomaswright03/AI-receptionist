@@ -94,7 +94,7 @@ export function systemPrompt(
     "TO BOOK A CALL, LEARN",
     ...flow.questions.map((q) => `- ${q}`),
     "- Always ask the caller's name, even if they called before.",
-    "- If they have no email or won't give one, call take_message instead (urgent: true) with what they need, and tell them the owner will call them back to book.",
+    "- If they have no email or won't give one, call take_message instead (urgent: false: it is a routine request that can wait for the owner's next email) with what they need, and tell them the owner will call them back to book.",
     "",
     "OPEN TIMES (offer at most three at once; use the exact start value when booking)",
     times,
@@ -105,7 +105,8 @@ export function systemPrompt(
     "RULES",
     ...flow.rules.map((r) => `- ${r}`),
     "- If book_discovery_call says the time was just taken, apologise and offer the next open times.",
-    "- If book_discovery_call says it is unsure, tell the caller the owner will confirm by text shortly. Do not say it is booked.",
+    `- If book_discovery_call says it is unsure, tell the caller the owner will confirm ${business.ownerPhone ? "by text" : "by email"} shortly. Do not say it is booked.`,
+    "- If a transfer to the owner is not answered or fails, apologise, ask for their name and what they need, call take_message (urgent: true), and say the owner will call back.",
     "- Say goodbye and end the call once the caller is done.",
   ].join("\n");
 }
@@ -166,7 +167,19 @@ export function buildAssistant(
     tools.push({
       type: "transferCall",
       destinations: [
-        { type: "number", number: business.ownerPhone, message: "One moment, I'm connecting you now.", description: "The owner" },
+        {
+          type: "number",
+          number: business.ownerPhone,
+          message: "One moment, I'm connecting you now.",
+          description: "The owner",
+          // If the owner doesn't pick up, the call comes back to the agent, who takes a message.
+          // Field names follow Vapi's transferPlan; verify on the first live transfer test (qa row 17).
+          transferPlan: {
+            mode: "warm-transfer-say-message",
+            message: "Hello, I have a caller on the line for you.",
+            fallbackPlan: { message: "I couldn't reach them just now. Let me take a message instead.", endCallEnabled: false },
+          },
+        },
       ],
     });
   }
@@ -210,7 +223,7 @@ export function buildStubAssistant(
   const safety =
     " If the caller describes an emergency (danger to life, injury, fire, crime in progress, self-harm), say 'Please hang up and call 911 now' first, then call take_message with urgent: true. Give no medical, legal, tax or financial advice, and make no promises about prices, timing or outcomes.";
   const prompt = (ctx.canTransfer
-    ? "You are a receptionist in test mode. After the greeting, say 'Let me connect you with Thomas' and transfer the call right away. Do nothing else."
+    ? "You are a receptionist in test mode. After the greeting, say 'Let me connect you with Thomas' and transfer the call right away. If the transfer is not answered or fails, ask for the caller's name and what they need, call take_message with urgent: true, and say Thomas will call back. Do nothing else."
     : ("You are a receptionist in test mode. Thomas is not available. Ask for the caller's name and what they need, call take_message, say Thomas will call back, then end the call. Do nothing else.")) + safety;
   const model = full.model as Record<string, unknown>;
   return { ...full, name: `${business.id}-stub`, model: { ...model, messages: [{ role: "system", content: prompt }] } };

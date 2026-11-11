@@ -13,7 +13,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
-    "coverage": "vitest run --coverage"
+    "coverage": "vitest run --coverage",
+    "smoke": "bash scripts/smoke.sh",
+    "eval": "tsx scripts/eval.ts"
   },
   "dependencies": {
     "@hono/node-server": "2.1.6",

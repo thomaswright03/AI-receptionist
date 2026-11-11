@@ -60,7 +60,7 @@ static TwiML Bin dialing the owner) answers instead.
 - Owner texts only for what needs action now (failed/unclear bookings, urgent
   messages, missed calls, watchdog); bookings and routine messages go to email.
 - Text-backs: a one-time reply to the caller's own call, once per 24 hours,
-  8am-9pm local, STOP honoured. Daily call and text caps per business.
+  STOP honoured. Only sent when it is 8am-9pm for the caller; we check the business zone plus Eastern and Pacific, so for Phoenix that is about 9am-7pm in winter and 8am-6pm in summer. Hawaii and Alaska numbers are never texted (the owner is told). Daily call and text caps per business.
 - The agent never takes card numbers or quotes anything outside the approved FAQ.
 - Twilio webhooks require a valid `X-Twilio-Signature`; Vapi messages require
   `X-Vapi-Secret` when `VAPI_SECRET` is set.
@@ -78,13 +78,18 @@ npm run typecheck
 npm run dev       # local server on :8080
 ```
 
-Deploy (not yet done; needs a paid host): on Fly, `fly volumes create receptionist_data --region phx --size 1` once, then `fly deploy` (`fly.toml` mounts the volume at `/data`). On Render, use `render.yaml` (persistent disk at `/data`, paid plan). Settings: `.env.example`. With `DRY_RUN=false` the service refuses to start if the state directory isn't writable; with it unwritable in dry-run, writes are logged (`store.persist.failed`) and `/admin/status.json` shows "State storage: down".
+Smoke test (also in CI): `npm run build && npm run smoke` boots the server in dry-run with a temp state file, checks `/health`, and stops it. Eval of the live prompt (on demand, needs `ANTHROPIC_API_KEY`): `npm run eval`, results in `docs/eval-results/`. Owner guide: `docs/owner-guide.md`.
+
+Deploy (paid persistent-disk host not yet approved; see "Deployment record" below): on Fly, `fly volumes create receptionist_data --region phx --size 1` once, then `fly deploy` (`fly.toml` mounts the volume at `/data`). On Render, use `render.yaml` (persistent disk at `/data`, paid plan). Settings: `.env.example`. With `DRY_RUN=false` the service refuses to start if the state directory isn't writable; with it unwritable in dry-run, writes are logged (`store.persist.failed`) and `/admin/status.json` shows "State storage: down".
+
+### Deployment record
+Free dry-run deploy (stub agent, no disk, `STATE_FILE` unset): see `STATE.md` for the URL and date once created. Set `APP_VERSION` to the commit on every deploy (Fly: `fly deploy --env APP_VERSION=$(git rev-parse --short HEAD)`; Render: env var). Backup marker: the host's snapshot job may touch `<STATE_FILE>.backup`; `/admin/status.json` "Latest backup" reads its time (Unknown until then). Restore drill: not done yet (needs the disk host).
 
 ### Backups, restore, rollback
 - State is one JSON file (`STATE_FILE`). Fly takes daily volume snapshots (14 days kept); on Render enable disk snapshots. Worst-case data loss: up to 24 h of messages, calls and opt-outs.
 - Restore: `fly volumes create receptionist_data_restore --snapshot-id <id>` then point a scratch app at it, check `/admin/status.json`, and swap. Expect about 15 minutes. (Never drilled yet: needs a live host.)
 - Rollback: `fly deploy --image <previous image ref>` (see `fly releases`), or Render's "Rollback" on the previous deploy.
-- Outside alert: point a free uptime monitor (e.g. UptimeRobot) at `/health` with email/SMS to the owner; the in-process watchdog cannot report its own death. `/admin/status.json` marks the text-back job `down` if it hasn't run in 3 minutes.
+- Outside alert: `.github/workflows/uptime.yml` curls `<DEPLOY_URL>/health` every 15 minutes and fails (GitHub emails the repo owner) when it is down; set the repo variable `DEPLOY_URL`. A dedicated monitor (e.g. UptimeRobot) with SMS is better. Point it (e.g. UptimeRobot) at `/health` with email/SMS to the owner; the in-process watchdog cannot report its own death. `/admin/status.json` marks the text-back job `down` if it hasn't run in 3 minutes.
 - Retention: calls and events older than 90 days are swept every 6 hours. Caps ("per day") are a rolling 24 hours.
 
 QA call script: `docs/qa-cases.md`. Status and what's next: `STATE.md`.
@@ -92,7 +97,19 @@ QA call script: `docs/qa-cases.md`. Status and what's next: `STATE.md`.
 ## Legal
 Privacy notice: `docs/legal/privacy.md` (served at `/privacy`); terms: `docs/legal/terms.md` (`/terms`). Also in `docs/legal/`: applicable law, contracts register, vendors, messaging, claims, data inventory, breach plan.
 
-## Latest Update (2026-11-11, fix round 3)
+## Latest Update (2026-11-11, fix round 4)
+- No frontend changes (there is no web UI). Owner-facing changes:
+- A transfer the owner doesn't answer now comes back to the receptionist, who takes a message (urgent) and the owner is alerted; the call shows as "missed, texted back", not "passed to a person".
+- Every missed call reaches the owner by text, or by email if the text can't be sent or there is no owner phone. If both fail it is logged and the status page shows "Owner alerts: down".
+- A call whose final report never arrives is closed after 20 minutes by a background job: the caller is texted back (if allowed) and the owner told. Status shows "Unfinished calls" and the job.
+- `/admin/status.json` has Twilio, Resend, Vapi, Kill switch, Latest backup, Owner alerts and Unfinished calls rows.
+- Texting window stated honestly (about 9am-7pm Phoenix in winter, 8am-6pm in summer). Hawaii and Alaska numbers are reported to the owner at once instead of queued; a queued text-back that expires tells the owner by email. The owner is texted once per queued missed call.
+- Owner can text HELP; STOP from the owner is ignored with a warning. New `docs/owner-guide.md`, sent with the first weekly summary.
+- A caller with no email is a routine message (no instant text). Prompt says "by email" when the owner has no phone.
+- Mountain High Disposal roll-off flow and business added (placeholder content, active once `MOUNTAIN_HIGH_NUMBER` is set).
+- `npm run eval` (on demand), `npm run smoke` (CI boots the server), uptime workflow for `/health`.
+
+## Earlier update (2026-11-11, fix round 3)
 - No frontend changes in this round.
 - Callers who reach the missed-call message now hear "We'll get back to you as soon as we can" (no promise of a text). Booking and tool-error alerts fall back to email when there is no owner phone, and the agent says "by email" then.
 - Status: STATUS by text and the weekly email now say in plain words what happened in the last 24 hours, how many text-backs are waiting, and anything broken. `/admin/status.json` uses the standard shape (`overall`, `checked_at`, `functions[]` with `tier`), has a row per scheduled job (last success, next run, last error), and Important rows for "Calls answered" and "Messages delivered". A job is "ok" only after it finishes; a failing one shows Down with its error.

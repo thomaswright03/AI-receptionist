@@ -83,6 +83,10 @@ export async function sms(deps: Deps, p: Params): Promise<string> {
   if (business && business.ownerPhone && from === business.ownerPhone) {
     const reply = await ownerCommand(deps, business, body);
     if (reply) return twiml(`<Message>${xml(reply)}</Message>`);
+    // The owner texting STOP must not opt their own number out: that would block every alert to them.
+    if (/^\s*(stop|stopall|unsubscribe|cancel|end|quit)\s*$/i.test(body)) {
+      return twiml("<Message>STOP is for callers, so it was ignored and your alerts keep coming. To send calls to your cell instead of the receptionist, text PAUSE. Text HELP for the list.</Message>");
+    }
   }
   const optOut = await handleOptOut(deps.store, from, body);
   if (optOut === "keyword" || optOut === "start") return twiml("");

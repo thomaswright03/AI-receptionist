@@ -8,6 +8,7 @@ import { VOLATILE } from "./store.js";
 export const JOBS = {
   textback: { label: "Queued text-back job", everyMs: 60_000 },
   weekly: { label: "Weekly summary job", everyMs: 3_600_000 },
+  reconcile: { label: "Lost call report job", everyMs: 5 * 60_000 },
   sweep: { label: "Retention sweep", everyMs: 6 * 3_600_000 },
 } as const;
 export type JobName = keyof typeof JOBS;
@@ -56,6 +57,7 @@ export function endedWords(reason: string | undefined): string {
   if (/assistant-ended|assistant-said-end/i.test(reason)) return "the receptionist finished the call";
   if (/forwarded|transfer/i.test(reason)) return "the call was passed to a person";
   if (/silence/i.test(reason)) return "nobody spoke";
+  if (reason === "report-lost") return "the final report never arrived";
   if (/error|failed|fault|timed-out/i.test(reason)) return `a technical problem (${reason})`;
   return reason;
 }

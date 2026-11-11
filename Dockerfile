@@ -12,7 +12,7 @@ ENV NODE_ENV=production
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY docs/legal ./docs/legal
-COPY docs/latest-update.md ./docs/latest-update.md
+COPY docs/latest-update.md docs/owner-guide.md ./docs/
 COPY package.json ./
 RUN mkdir -p /data
 EXPOSE 8080

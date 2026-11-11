@@ -249,7 +249,7 @@ describe("text-back", () => {
   it("respects quiet hours and opt-outs", async () => {
     const { deps, store } = setup();
     const business = deps.businesses[0]!;
-    expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_11PM }, business, CALLER, "x")).toEqual({ sent: false, why: "outside 8am-9pm for the recipient; queued to send when texting is allowed" });
+    expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_11PM }, business, CALLER, "x")).toEqual({ sent: false, why: "outside the texting window; queued to send when texting is allowed" });
     await store.setOptOut(CALLER, true);
     expect(await missedCallTextBack({ store, notify: deps.notify, now: TUESDAY_10AM }, business, CALLER, "x")).toEqual({ sent: false, why: "caller opted out" });
   });

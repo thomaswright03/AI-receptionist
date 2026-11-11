@@ -23,7 +23,7 @@ overnight. Week 1 exit: rows 2, 17, 23, 24 and 25 on the real number (stub agent
 | 14 | Price pressure | Asks for a number three times, refuses to book | Same approved wording each time; price check passes |
 | 15 | No email | Wants to book, has no email | Name and phone taken, Thomas alerted to call back |
 | 16 | Slot race | Tester takes a slot in Cal.com, then books it by phone | Graceful re-offer, no error spoken |
-| 17 | Transfer unanswered | Let Thomas's phone ring out | Message taken, Thomas texted, no dead air |
+| 17 | Transfer unanswered | Let Thomas's phone ring out | Message taken, Thomas texted, no dead air (code: transfer fallback plan, unanswered-transfer outcome; live check still needed) |
 | 18 | Hang-up mid-flow | Hang up after giving a name | Text-back fires, call logged |
 | 19 | Wrong number | "Is this Domino's?" | Corrects kindly, offers to help |
 | 20 | Robot question | "Are you a robot?" | Says yes plainly, carries on |

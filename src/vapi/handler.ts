@@ -6,7 +6,9 @@ import type { Notifier } from "../notify.js";
 import { withinHours } from "../safety/hours.js";
 import type { Store } from "../store.js";
 import type { Watchdog } from "../safety/watchdog.js";
+import { alertOwner } from "../alerts.js";
 import { missedCallTextBack, sendCallerSms } from "../textBack.js";
+import { VOLATILE } from "../store.js";
 import { endedWords, outcomeWords } from "../status.js";
 import { DISCLOSURE_VERSION } from "./assistant.js";
 import { bookCall, openTimes } from "../tools/calcom.js";
@@ -220,14 +222,6 @@ async function runTool(
   return { ok: false, say: "Unknown tool." };
 }
 
-/** Alerts the owner by text, or by email when there is no owner phone or the text fails. */
-async function alertOwner(deps: Deps, business: Business, subject: string, text: string): Promise<void> {
-  const from = business.inboundNumbers[0];
-  if (from && business.ownerPhone && (await deps.notify.sms(business.ownerPhone, from, text)).ok) return;
-  const r = await deps.notify.email(business.ownerEmail, subject, text);
-  if (!r.ok) console.error(JSON.stringify({ event: "owner-alert.failed", subject, error: r.error }));
-}
-
 async function baseCall(deps: Deps, callId: string, business: Business, caller: string) {
   return (
     (await deps.store.getCall(callId)) ?? {
@@ -240,15 +234,23 @@ async function baseCall(deps: Deps, callId: string, business: Business, caller: 
   );
 }
 
+/** A transfer that never reached a person: the owner was busy, didn't answer, or the hand-off failed. */
+export function transferUnanswered(endedReason: string | undefined): boolean {
+  const r = endedReason ?? "";
+  return /(forward|transfer)/i.test(r) && /(busy|fail|no-answer|not-answered|unanswered|error|voicemail|timed-out)/i.test(r);
+}
+
 /** Did the call fail before the caller got anywhere? Then they get a text-back. */
 export function needsTextBack(endedReason: string | undefined, userTurns: number, outcome: string): boolean {
   if (outcome !== "unknown") return false;
+  if (transferUnanswered(endedReason)) return true;
   if (/forwarded|transfer/i.test(endedReason ?? "")) return false;
   if (/error|failed|fault|timed-out|silence/i.test(endedReason ?? "")) return true;
   return /customer-ended/i.test(endedReason ?? "") && userTurns <= 1;
 }
 
 async function endOfCall(deps: Deps, m: VapiMessage): Promise<void> {
+  await deps.store.setFlag(`${VOLATILE}vapi:last-report`, (deps.now?.() ?? new Date()).toISOString()).catch(() => undefined);
   const business = businessOf(deps, m);
   const callId = m.call?.id;
   if (!business || !callId) return;
@@ -256,9 +258,9 @@ async function endOfCall(deps: Deps, m: VapiMessage): Promise<void> {
   const existing = await baseCall(deps, callId, business, caller);
   const userTurns = (m.artifact?.messages ?? []).filter((x) => x.role === "user").length;
   let outcome = existing.outcome;
-  if (outcome === "unknown" && /forwarded|transfer/i.test(m.endedReason ?? "")) outcome = "transferred";
+  if (outcome === "unknown" && /forwarded|transfer/i.test(m.endedReason ?? "") && !transferUnanswered(m.endedReason)) outcome = "transferred";
   if (needsTextBack(m.endedReason, userTurns, outcome)) {
-    await missedCallTextBack({ store: deps.store, notify: deps.notify, now: deps.now?.() }, business, caller, `call ended: ${m.endedReason}`, callId);
+    await missedCallTextBack({ store: deps.store, notify: deps.notify, now: deps.now?.() }, business, caller, transferUnanswered(m.endedReason) ? `transfer to the owner was not answered (${m.endedReason})` : `call ended: ${m.endedReason}`, callId);
     outcome = "text-back";
   }
   await deps.store.saveCall({

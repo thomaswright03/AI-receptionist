@@ -34,13 +34,15 @@ export function withinHours(hours: WeeklyHours, at: Date, timeZone: string): boo
 const EVERY_DAY = [0, 1, 2, 3, 4, 5, 6];
 const QUIET = { days: EVERY_DAY, start: "08:00", end: "21:00" };
 
+export const isHawaiiOrAlaska = (recipient: string) => /^\+1(808|907)/.test(recipient);
+
 /**
- * Texts go out only when it is 8am to 9pm for the recipient. We don't look up the
- * recipient's zone; we require the window to hold in the business zone and in both
- * Eastern and Pacific time, which covers every continental US zone. Hawaii (808)
- * and Alaska (907) numbers are not texted.
+ * Texts go out only when it is 8am to 9pm for the recipient. We don't look up the recipient's zone;
+ * we require the window to hold in the business zone and in both Eastern and Pacific time, which
+ * covers every continental US zone. For a Phoenix business that means about 9am to 7pm Phoenix time
+ * in winter and 8am to 6pm in summer. Hawaii (808) and Alaska (907) numbers are never texted.
  */
 export function textingAllowed(at: Date, timeZone: string, recipient?: string): boolean {
-  if (recipient && /^\+1(808|907)/.test(recipient)) return false;
+  if (recipient && isHawaiiOrAlaska(recipient)) return false;
   return [timeZone, "America/New_York", "America/Los_Angeles"].every((tz) => withinHours(QUIET, at, tz));
 }

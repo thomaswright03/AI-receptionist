@@ -39,6 +39,11 @@ const schema = z.object({
   OWNER_EMAIL_WRIGHT_AI: z.string().optional(),
   WRIGHT_AI_NUMBER: z.string().optional(),
   CAL_LINK_WRIGHT_AI: z.string().optional(),
+  /** Mountain High Disposal (second pilot): the business is active only when its number is set. */
+  MOUNTAIN_HIGH_NUMBER: z.string().optional(),
+  OWNER_PHONE_MOUNTAIN_HIGH: z.string().optional(),
+  OWNER_EMAIL_MOUNTAIN_HIGH: z.string().optional(),
+  MOUNTAIN_HIGH_TIME_ZONE: z.string().default("America/Denver"),
 });
 
 export type Env = z.infer<typeof schema>;

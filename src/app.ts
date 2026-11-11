@@ -3,9 +3,7 @@ import { readFile } from "node:fs/promises";
 import { Hono } from "hono";
 import { validTwilioSignature } from "./twilio/signature.js";
 import * as twilio from "./twilio/routes.js";
-import { agentPaused } from "./safety/killswitch.js";
-import { callFailed, JOBS, jobState, plainStatus, type JobName } from "./status.js";
-import { openTimes } from "./tools/calcom.js";
+import { buildStatus } from "./statusJson.js";
 import { handleVapi, type Deps } from "./vapi/handler.js";
 
 function sameSecret(a: string, b: string | undefined): boolean {
@@ -39,67 +37,7 @@ export function createApp(deps: Deps): Hono {
   // Owner/operator status in the standard tiered shape: real checks, behind ADMIN_SECRET.
   app.get("/admin/status.json", async (c) => {
     if (!isAdmin(c.req.header("authorization"))) return c.json({ error: "unauthorized" }, 401);
-    const now = deps.now?.() ?? new Date();
-    const iso = now.toISOString();
-    type St = "ok" | "warning" | "down" | "unknown";
-    type Tier = "important" | "key" | "basic";
-    // last_checked is set only for rows actually evaluated from a recorded result now; null otherwise.
-    const fn = (tier: Tier, name: string, status: St, detail: string, o: { checked?: boolean; lastSuccess?: string | null; next?: string | null } = {}) =>
-      ({ name, tier, status, detail, last_checked: o.checked === false ? null : iso, last_success: o.lastSuccess ?? null, next_expected_run: o.next ?? null });
-    const week = new Date(now.getTime() - 7 * 86_400_000);
-
-    // Cal.com: the real event's slots, not just any HTTP reply.
-    const calBiz = deps.businesses.find((b) => b.cal);
-    let cal = fn("important", "Cal.com availability", "unknown", "no Cal.com event configured (CAL_LINK_*)", { checked: false });
-    if (calBiz?.cal) {
-      const slots = await openTimes(calBiz.cal, now, new Date(now.getTime() + 7 * 86_400_000), deps.env.CAL_API_KEY, deps.fetch);
-      cal = slots === null ? fn("important", "Cal.com availability", "down", "slots request failed") : fn("important", "Cal.com availability", slots.length ? "ok" : "warning", `${slots.length} open slots in the next 7 days`, { lastSuccess: slots.length ? iso : null });
-    }
-    // Recorded results: how calls ended and whether messages reached the owner (last 7 days, all businesses).
-    const calls = (await Promise.all(deps.businesses.map((b) => deps.store.recentCalls(b.id, week)))).flat();
-    const failedCalls = calls.filter(callFailed).length;
-    const answered = !calls.length
-      ? fn("important", "Calls answered", "unknown", "no calls recorded in the last 7 days", { checked: false })
-      : fn("important", "Calls answered", failedCalls === 0 ? "ok" : failedCalls * 2 >= calls.length && failedCalls >= 3 ? "down" : "warning", `${calls.length - failedCalls} of ${calls.length} calls ended without a technical error (7 days)`, { lastSuccess: calls.filter((c) => !callFailed(c)).map((c) => c.endedAt).filter(Boolean).sort().at(-1) ?? null });
-    const messages = calls.filter((c) => c.message);
-    const undelivered = messages.filter((c) => c.message!.delivered === "none").length;
-    const delivered = !messages.length
-      ? fn("important", "Messages delivered", "unknown", "no caller messages in the last 7 days", { checked: false })
-      : fn("important", "Messages delivered", undelivered ? "down" : "ok", undelivered ? `${undelivered} of ${messages.length} messages saved but not sent to the owner` : `all ${messages.length} messages reached the owner`, { lastSuccess: messages.filter((c) => c.message!.delivered !== "none").map((c) => c.message!.at).sort().at(-1) ?? null });
-
-    const jobRows = await Promise.all((Object.keys(JOBS) as JobName[]).map(async (j) => {
-      const s = await jobState(deps.store, j, now);
-      return fn("key", JOBS[j].label, s.status, s.lastErr ? `failing: ${s.lastErr}` : s.lastOk ? `last success ${s.lastOk}` : "has not completed a run yet", { lastSuccess: s.lastOk, next: s.next, checked: s.status !== "unknown" });
-    }));
-    const wd = deps.watchdog && deps.env.WATCHDOG_URLS ? fn("key", "Watchdog", deps.watchdog.healthy ? "ok" : "down", deps.watchdog.lastError ?? "healthy", { lastSuccess: deps.watchdog.healthy ? iso : null }) : fn("key", "Watchdog", "unknown", "off (WATCHDOG_URLS is empty)", { checked: false });
-    const disk = deps.env.STATE_FILE ? fn("important", "State storage", deps.store.lastPersistError ? "down" : "ok", deps.store.lastPersistError ?? `writing to ${deps.env.STATE_FILE}`, { lastSuccess: deps.store.lastPersistError ? null : iso }) : fn("important", "State storage", "warning", "STATE_FILE not set: state is lost on restart");
-    const cfgMissing = missingConfig();
-    const config = fn("important", "Live configuration", cfgMissing.length ? (deps.env.DRY_RUN === "false" ? "down" : "warning") : "ok", cfgMissing.length ? `missing: ${cfgMissing.join(", ")}` : "all present", { lastSuccess: cfgMissing.length ? null : iso });
-
-    const businesses = await Promise.all(
-      deps.businesses.map(async (b) => {
-        const paused = await agentPaused(deps, b).catch((err: unknown) => ({ paused: true, why: String(err) }));
-        return {
-          id: b.id,
-          paused,
-          lastCallAt: (await deps.store.getFlag(`last-call-at:${b.id}`)) ?? null,
-          queuedTextBacks: (await deps.store.listFlags(`deferred-textback:${b.id}|`)).length,
-          outcomesToday: await deps.store.outcomesSince(b.id, new Date(now.getTime() - 86_400_000)),
-          outcomes7Days: await deps.store.outcomesSince(b.id, week),
-          summary: await plainStatus(deps, b, paused, now),
-        };
-      }),
-    );
-    const functions = [
-      answered, delivered, cal, disk, config,
-      ...jobRows, wd,
-      fn("basic", "Version", "ok", deps.env.APP_VERSION ?? "unknown", { checked: false }),
-      fn("basic", "Mode", "ok", `agent=${deps.env.AGENT_MODE}, dryRun=${deps.env.DRY_RUN !== "false"}, killSwitch=${deps.env.KILL_SWITCH}`, { checked: false }),
-    ];
-    // Overall counts Important rows only; unknown rows don't change it.
-    const overall = functions.filter((f) => f.tier === "important" && f.status !== "unknown").reduce<St>((w, f) => (f.status === "down" || (f.status === "warning" && w === "ok") ? f.status : w), "ok");
-    const latestUpdate = await readFile(new URL("../docs/latest-update.md", import.meta.url), "utf8").catch(() => null);
-    return c.json({ overall, checked_at: iso, functions, businesses, latestUpdate });
+    return c.json(await buildStatus(deps, missingConfig(), deps.now?.() ?? new Date()));
   });
 
   // Public legal documents (linked from the text-back and the 10DLC registration).

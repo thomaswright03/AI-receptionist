@@ -1,0 +1,13 @@
+name: Uptime
+# Outside check on the deployed /health. Fails (and GitHub emails the repo owner) when the service is down.
+# Set the repo variable DEPLOY_URL (e.g. https://ai-receptionist.onrender.com) to turn it on.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    if: ${{ vars.DEPLOY_URL != '' }}
+    steps:
+      - run: curl --fail --silent --show-error --max-time 20 --retry 2 --retry-delay 10 "${{ vars.DEPLOY_URL }}/health"

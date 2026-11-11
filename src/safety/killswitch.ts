@@ -41,7 +41,7 @@ export async function agentPaused(
 
 /**
  * Owner commands by text, from the owner's own cell to the business number:
- * PAUSE (calls ring the owner), RESUME (calls go to the agent), STATUS.
+ * PAUSE (calls ring the owner), RESUME (calls go to the agent), STATUS, HELP.
  * Returns the reply to send, or undefined if the text wasn't a command.
  */
 export async function ownerCommand(
@@ -60,6 +60,9 @@ export async function ownerCommand(
     return state.paused
       ? `Your pause is cleared, but calls still ring you: ${state.why}.`
       : "Resumed, callers now reach the AI receptionist. Reply PAUSE to undo.";
+  }
+  if (word === "HELP" || word === "?") {
+    return "Texts you can send this number: PAUSE (calls ring your cell), RESUME (calls go to the AI receptionist), STATUS (what happened lately and anything broken). Replies you get here are alerts about missed calls and messages.";
   }
   if (word === "STATUS") {
     return plainStatus(deps, business, await agentPaused(deps, business), deps.now?.() ?? new Date());

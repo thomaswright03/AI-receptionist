@@ -1,4 +1,6 @@
 import type { Env } from "./config/env.js";
+import type { Store } from "./store.js";
+import { VOLATILE } from "./store.js";
 
 // Texts and emails. With DRY_RUN=true (the default) nothing is sent; each
 // message is logged and returned so tests and the first live runs can see it.
@@ -67,5 +69,20 @@ export function notifier(env: Env, fetchImpl: typeof fetch = fetch): Notifier {
         return { ...base, ok: false, error: String(err) };
       }
     },
+  };
+}
+
+/** Key holding the last real send result for a channel: "<iso> ok" or "<iso> <error>". Memory only. */
+export const sendKey = (channel: "sms" | "email") => `${VOLATILE}send:${channel}`;
+
+/** Wraps a notifier so the status endpoint can show whether Twilio and Resend last worked. Dry runs are not recorded. */
+export function recordingNotifier(inner: Notifier, store: Store, now: () => Date = () => new Date()): Notifier {
+  const note = (s: Sent): Sent => {
+    if (!s.dryRun) void store.setFlag(sendKey(s.channel), `${now().toISOString()} ${s.ok ? "ok" : s.error ?? "failed"}`).catch(() => undefined);
+    return s;
+  };
+  return {
+    async sms(to, from, body) { return note(await inner.sms(to, from, body)); },
+    async email(to, subject, body) { return note(await inner.email(to, subject, body)); },
   };
 }

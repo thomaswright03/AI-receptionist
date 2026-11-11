@@ -1,43 +1,47 @@
 import type { Business } from "./config/types.js";
 import type { Notifier } from "./notify.js";
 import type { Store } from "./store.js";
-import { textingAllowed } from "./safety/hours.js";
+import { alertOwner } from "./alerts.js";
+import { isHawaiiOrAlaska, textingAllowed } from "./safety/hours.js";
 
 const DAY = 24 * 60 * 60 * 1000;
 
 export type TextBackResult = { sent: true } | { sent: false; why: string };
 
 // Texts a caller whose call was missed, at most once in any rolling 24 hours, never to an
-// opted-out number, never outside 8am-9pm local, never past the daily cap.
-// The owner is alerted either way, so a missed call never goes unseen.
+// opted-out number, never outside the texting window, never past the daily cap.
+// The owner is always told, by text or else by email; if both fail it is logged and shown on the status page.
+// (`ownerVia: "email"` is used for a queued text-back that finally goes out: the owner was already texted once.)
 export async function missedCallTextBack(
   deps: { store: Store; notify: Notifier; now?: Date },
   business: Business,
   caller: string,
   reason: string,
   callId?: string,
+  ownerVia: "sms" | "email" = "sms",
 ): Promise<TextBackResult> {
   const now = deps.now ?? new Date();
   const from = business.inboundNumbers[0];
   const result = await decide();
-  const queued = result.sent === false && result.why.startsWith("outside 8am-9pm");
-  if (queued && from && business.ownerPhone) {
-    await deps.notify.sms(business.ownerPhone, from, `Missed call from ${caller} (${reason}). Texting is closed now; they will be texted back when it opens.`);
-  } else if (result.sent === false && from && business.ownerPhone) {
-    await deps.notify.sms(business.ownerPhone, from, `Missed call from ${caller} (${reason}). No text-back sent: ${result.why}.`);
-  } else if (from && business.ownerPhone) {
-    await deps.notify.sms(business.ownerPhone, from, `Missed call from ${caller} (${reason}). They were texted back.`);
-  }
+  const queued = result.sent === false && result.why.startsWith("outside the texting window");
+  const line = queued
+    ? `Missed call from ${caller} (${reason}). Texting is closed right now; they will be texted when it opens, within 24 hours.`
+    : result.sent === false
+      ? `Missed call from ${caller} (${reason}). No text-back sent: ${result.why}.`
+      : `Missed call from ${caller} (${reason}). They were texted back.`;
+  await alertOwner({ ...deps, now: () => now }, business, `Missed call from ${caller}`, line, ownerVia);
   return result;
 
   async function decide(): Promise<TextBackResult> {
     if (!from) return { sent: false, why: "business has no number" };
     if (!/^\+1\d{10}$/.test(caller)) return { sent: false, why: "caller number is hidden or not a US mobile format" };
     if (await deps.store.isOptedOut(caller)) return { sent: false, why: "caller opted out" };
+    // Hawaii and Alaska numbers can never fall inside our window, so they are not queued: the owner is told at once.
+    if (isHawaiiOrAlaska(caller)) return { sent: false, why: "caller is in Hawaii or Alaska, outside our texting window (not texted)" };
     if (!textingAllowed(now, business.timeZone, caller)) {
       // Not lost: queued, and sent by flushDeferredTextBacks when the window opens (within 24 hours).
       await deps.store.setFlag(`${DEFERRED}${business.id}|${caller}`, JSON.stringify({ at: now.toISOString(), reason, callId }));
-      return { sent: false, why: "outside 8am-9pm for the recipient; queued to send when texting is allowed" };
+      return { sent: false, why: "outside the texting window; queued to send when texting is allowed" };
     }
     const last = await deps.store.lastTextTo(business.id, caller);
     if (last && now.getTime() - last.getTime() < DAY) return { sent: false, why: "already texted in the last 24 hours" };
@@ -72,10 +76,14 @@ export async function flushDeferredTextBacks(
       continue;
     }
     if (!business) { await deps.store.setFlag(key, undefined); continue; }
-    if (now.getTime() - new Date(item.at).getTime() > DAY) { await deps.store.setFlag(key, undefined); continue; }
+    if (now.getTime() - new Date(item.at).getTime() > DAY) {
+      await deps.store.setFlag(key, undefined);
+      await alertOwner({ ...deps, now: () => now }, business, `Not texted back: ${caller}`, `Missed call from ${caller} (${item.reason}). The text-back waited 24 hours for the texting window and was dropped. Please call them back.`, "email");
+      continue;
+    }
     if (!textingAllowed(now, business.timeZone, caller)) continue;
     await deps.store.setFlag(key, undefined);
-    await missedCallTextBack({ store: deps.store, notify: deps.notify, now }, business, caller, `${item.reason}, queued overnight`, item.callId);
+    await missedCallTextBack({ store: deps.store, notify: deps.notify, now }, business, caller, `${item.reason}, queued overnight`, item.callId, "email");
     handled++;
   }
   return handled;

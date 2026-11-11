@@ -17,3 +17,4 @@ jobs:
       - run: npm run lint
       - run: npm run coverage
       - run: npm run build
+      - run: npm run smoke
